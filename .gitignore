@@ -1,0 +1,23 @@
+# Local runtime, credentials and private keys
+.env
+.env.*
+!.env.example
+.local/
+data/
+config/.mcp-hub/
+.mcp-hub/
+
+# Installed dependencies and platform caches
+node_modules/
+__pycache__/
+*.py[cod]
+.DS_Store
+.pytest_cache/
+
+# Legacy single-user Cloudflare setup (contains private configuration)
+cloudflare/
+
+# Distribution/build outputs
+*.zip
+*.tar.gz
+*.log

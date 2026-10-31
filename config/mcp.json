@@ -1,0 +1,32 @@
+{
+  "mcpServers": {
+    "blender": {
+      "command": "uvx",
+      "args": [
+        "mcp-for-blender"
+      ]
+    },
+    "terminal": {
+      "command": "uvx",
+      "args": [
+        "-q",
+        "--from",
+        "open-terminal[mcp]==0.14.7",
+        "python",
+        "-c",
+        "from open_terminal.mcp_server import mcp; mcp.run(transport='stdio')"
+      ],
+      "env": {
+        "OPEN_TERMINAL_API_KEY": "${OPEN_TERMINAL_API_KEY}"
+      }
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--autoConnect"
+      ]
+    }
+  }
+}

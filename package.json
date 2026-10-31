@@ -1,0 +1,9 @@
+{
+  "name": "agent-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-first private MCP gateway (Ubuntu/macOS)",
+  "dependencies": {
+    "@ni-c/mcp-hub": "0.11.7"
+  }
+}

@@ -1,0 +1,400 @@
+#!/usr/bin/env python3
+"""Private multi-MCP gateway launcher. Python 3.9+, Ubuntu and macOS. No pip dependencies."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import threading
+import queue
+from urllib.request import urlopen
+from urllib.error import URLError
+from zipfile import ZipFile
+from io import BytesIO
+
+ROOT = Path(__file__).resolve().parent
+LOCAL = ROOT / ".local"
+CONFIG = ROOT / "config" / "mcp.json"
+HUB = ROOT / "node_modules" / "@ni-c" / "mcp-hub" / "dist" / "index.js"
+VERSION = "0.0.19"
+PROFILE = "agent-mcp-bridge"
+
+
+def die(message: str) -> None:
+    raise SystemExit("ERROR: " + message)
+
+
+def load_env() -> dict[str, str]:
+    """Minimal KEY=VALUE .env support (not a shell interpreter). Explicit process env wins."""
+    result = os.environ.copy()
+    file = ROOT / ".env"
+    if file.exists():
+        for lineno, raw in enumerate(file.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                die(f".env:{lineno}: expected KEY=VALUE")
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", key):
+                die(f".env:{lineno}: invalid variable name")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            result.setdefault(key, value)
+    result["CONFIG_PATH"] = str(CONFIG)
+    result["DATA_PATH"] = str(LOCAL / "hub-state")
+    result["TOOL_CACHE_PATH"] = str(LOCAL / "tool-cache.json")
+    return result
+
+
+def node_bin() -> str:
+    node = shutil.which("node")
+    if not node:
+        die("Node.js >=22 is required (Ubuntu: nvm; macOS: brew install node).")
+    try:
+        version = subprocess.check_output([node, "-p", "process.versions.node.split('.')[0]"], text=True).strip()
+    except (subprocess.CalledProcessError, OSError):
+        die("Cannot determine Node.js version.")
+    if int(version) < 22:
+        die("Node.js >=22 is required, found " + version)
+    return node
+
+
+def hub_command(stdio: bool = True) -> list[str]:
+    if not HUB.is_file():
+        die("mcp-hub is not installed: run ./mcp-bridge setup first")
+    return [node_bin(), str(HUB)] + (["--stdio"] if stdio else [])
+
+
+def tunnel_binary() -> str:
+    user = os.environ.get("TUNNEL_CLIENT")
+    if user:
+        if Path(user).is_file():
+            return user
+        match = shutil.which(user)
+        if match:
+            return match
+        die("TUNNEL_CLIENT does not point to an executable")
+    local = LOCAL / "bin" / "tunnel-client"
+    if local.is_file():
+        return str(local)
+    executable = shutil.which("tunnel-client")
+    if executable:
+        return executable
+    die("tunnel-client is not installed: run ./mcp-bridge setup --mode openai")
+
+
+def check_config() -> dict:
+    try:
+        data = json.loads(CONFIG.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        die("Invalid config/mcp.json: " + str(exc))
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict) or not servers:
+        die("config/mcp.json must contain a nonempty mcpServers object")
+    for name, config in servers.items():
+        if not re.fullmatch(r"[a-zA-Z0-9_-]+", name):
+            die("Invalid MCP server name: " + name)
+        if not isinstance(config, dict):
+            die("Invalid MCP definition: " + name)
+        if not config.get("command") and not config.get("url"):
+            die("MCP " + name + " needs command (stdio) or url (HTTP)")
+    return servers
+
+
+def download_tunnel_client() -> None:
+    existing = LOCAL / "bin" / "tunnel-client"
+    if existing.is_file():
+        print("tunnel-client already installed:", existing)
+        return
+    system = {"Linux": "linux", "Darwin": "darwin"}.get(platform.system())
+    arch = {"x86_64": "amd64", "AMD64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+    if not system or not arch:
+        die(f"Unsupported platform: {platform.system()}/{platform.machine()}")
+    url = (f"https://github.com/openai/tunnel-client/releases/download/v{VERSION}/"
+           f"tunnel-client-v{VERSION}-{system}-{arch}.zip")
+    print("Downloading official OpenAI tunnel-client:", system, arch, VERSION, flush=True)
+    try:
+        with urlopen(url, timeout=90) as response:
+            data = response.read()
+        with ZipFile(BytesIO(data)) as z:
+            binary = z.read("tunnel-client")
+    except (URLError, OSError, KeyError, ValueError) as exc:
+        die(f"Download failed: {exc}. If GitHub is blocked, install the binary manually and set TUNNEL_CLIENT.")
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    temp = existing.with_suffix(".tmp")
+    temp.write_bytes(binary)
+    temp.chmod(0o700)
+    temp.replace(existing)
+    print("Installed", existing)
+
+
+def setup(mode: str) -> None:
+    node_bin()
+    check_config()
+    if not shutil.which("npm"):
+        die("npm is required")
+    if not shutil.which("uvx"):
+        die("uvx is required. Install uv first: https://docs.astral.sh/uv/getting-started/installation/")
+    print("Installing pinned @ni-c/mcp-hub...", flush=True)
+    subprocess.run(["npm", "ci", "--no-audit", "--no-fund"], cwd=ROOT, check=True)
+    if mode == "openai" and not os.environ.get("TUNNEL_CLIENT"):
+        download_tunnel_client()
+    envfile = ROOT / ".env"
+    if not envfile.exists():
+        shutil.copyfile(ROOT / ".env.example", envfile)
+        envfile.chmod(0o600)
+        print("Created .env (not configured; agent must populate credentials).")
+    # Open Terminal requires a key even for local stdio. Generate one if missing;
+    # mcp-hub injects it into only the terminal child process.
+    if not load_env().get("OPEN_TERMINAL_API_KEY"):
+        with envfile.open("a", encoding="utf-8") as f:
+            f.write("\nOPEN_TERMINAL_API_KEY=" + secrets.token_urlsafe(32) + "\n")
+        envfile.chmod(0o600)
+        print("Generated a private OPEN_TERMINAL_API_KEY in .env")
+    (LOCAL / "hub-state").mkdir(parents=True, exist_ok=True)
+    print("Setup complete. Edit config/mcp.json to add MCPs; populate .env for the selected tunnel.")
+    print("Then run: ./mcp-bridge doctor --mode", mode)
+
+
+def ensure_openai_profile(env: dict[str, str]) -> list[str]:
+    tunnel_id = env.get("CONTROL_PLANE_TUNNEL_ID", "")
+    key = env.get("CONTROL_PLANE_API_KEY", "")
+    if not tunnel_id or not key:
+        die("OpenAI tunnel requires CONTROL_PLANE_TUNNEL_ID and CONTROL_PLANE_API_KEY in .env. "
+            "See https://platform.openai.com/settings/organization/tunnels")
+    if not re.fullmatch(r"tunnel_(?:[a-z0-9]{4}_)?[a-z0-9]{32}", tunnel_id):
+        die("CONTROL_PLANE_TUNNEL_ID has invalid format.")
+    # The tunnel client runs mcp-hub as one stdio subprocess and forwards the aggregate.
+    # Paths are absolute; quotes needed only for paths with spaces (rare, but macOS supports them).
+    import shlex
+    cmd_string = shlex.join(hub_command(stdio=True))
+    binpath = tunnel_binary()
+    profiledir = LOCAL / "profiles"
+    profiledir.mkdir(parents=True, exist_ok=True)
+    subprocess.run([binpath, "init", "--force", "--sample", "sample_mcp_stdio_local",
+                    "--profile", PROFILE, "--profile-dir", str(profiledir),
+                    "--tunnel-id", tunnel_id, "--mcp-command", cmd_string],
+                   env=env, cwd=ROOT, check=True)
+    return [binpath, "--profile-dir", str(profiledir)]
+
+
+def openai_cmd(env: dict[str, str], doctor: bool = False) -> list[str]:
+    args = ensure_openai_profile(env)
+    # tunnel-client uses subcommands before their flags for consistent help/arg parsing.
+    common = [args[0], "doctor" if doctor else "run", "--profile", PROFILE,
+              "--profile-dir", args[2]]
+    if doctor:
+        common.append("--explain")
+    else:
+        common += ["--health.listen-addr", "127.0.0.1:0",
+                   "--health.url-file", str(LOCAL / "health.url")]
+    return common
+
+
+def ssh_cmd(env: dict[str, str]) -> list[str]:
+    target = env.get("SSH_TARGET", "")
+    if not target or target == "user@your-vps" or target.startswith("-"):
+        die("Set SSH_TARGET=user@your-vps in .env")
+    port = int(env.get("SSH_REMOTE_PORT", "17690"))
+    local_port = int(env.get("MCP_PORT", "7690"))
+    if not all(1 <= x <= 65535 for x in (port, local_port)):
+        die("Invalid SSH_REMOTE_PORT or MCP_PORT")
+    return ["ssh", "-N", "-T", "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=20", "-o", "ServerAliveCountMax=3",
+            "-R", f"127.0.0.1:{port}:127.0.0.1:{local_port}", target]
+
+
+def http_hub_cmd(env: dict[str, str]) -> list[str]:
+    external = env.get("EXTERNAL_URL", "")
+    password_hash = env.get("PASSWORD_HASH", "")
+    if not external.startswith("https://") or external == "https://mcp.example.com":
+        die("SSH mode requires EXTERNAL_URL=https://your-vps-domain in .env")
+    if not re.fullmatch(r"\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}", password_hash or ""):
+        die("SSH mode requires a valid bcrypt PASSWORD_HASH (generate via htpasswd -bnBC 10 '' 'password')")
+    env["EXTERNAL_URL"] = external.rstrip("/")
+    env["PORT"] = str(int(env.get("MCP_PORT", "7690")))
+    # mcp-hub currently calls app.listen(port) which binds all interfaces.
+    # An explicit Node preload constrains that single listener to 127.0.0.1.
+    return [node_bin(), "--require", str(ROOT / "bind-loopback.cjs"), str(HUB)]
+
+
+def supervise(commands: list[list[str]], env: dict[str, str]) -> None:
+    children: list[subprocess.Popen] = []
+    try:
+        for command in commands:
+            print("Starting:", " ".join(command[:3]), flush=True)
+            children.append(subprocess.Popen(command, env=env, cwd=ROOT))
+        while True:
+            for child in children:
+                if child.poll() is not None:
+                    die(f"Child process exited with status {child.returncode}")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping bridge...", flush=True)
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+        for child in children:
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+
+
+def start(mode: str) -> None:
+    check_config()
+    env = load_env()
+    if mode == "openai":
+        command = openai_cmd(env)
+        print("OpenAI Secure MCP Tunnel -> mcp-hub --stdio (Ctrl+C to stop)", flush=True)
+        supervise([command], env)
+    else:
+        hub = http_hub_cmd(env)
+        tunnel = ssh_cmd(env)
+        print(f"SSH reverse tunnel -> local mcp-hub, public endpoint: {env['EXTERNAL_URL']}/hub", flush=True)
+        supervise([hub, tunnel], env)
+
+
+
+def smoke_mcp(env: dict[str, str]) -> None:
+    """Real read-only JSON-RPC smoke test: initialize, list_servers, list_tools."""
+    servers = check_config()
+    proc = subprocess.Popen(hub_command(), env=env, cwd=ROOT,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+    responses: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: [responses.put(line) for line in proc.stdout], daemon=True).start()
+    seq = 0
+
+    def request(method: str, params: dict, timeout: float = 20) -> dict:
+        nonlocal seq
+        seq += 1
+        ident = seq
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": ident,
+                                     "method": method, "params": params}) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                item = json.loads(responses.get(timeout=max(.05, deadline - time.monotonic())))
+            except queue.Empty:
+                break
+            if item.get("id") == ident:
+                if "error" in item:
+                    die(f"MCP {method}: {item['error']}")
+                return item.get("result", {})
+        die(f"MCP {method} timed out after {timeout}s")
+
+    try:
+        request("initialize", {"protocolVersion": "2025-11-25",
+                                "capabilities": {},
+                                "clientInfo": {"name": "agent-mcp-bridge-doctor", "version": "1"}})
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n")
+        proc.stdin.flush()
+        deadline = time.monotonic() + 35
+        statuses = {}
+        while time.monotonic() < deadline:
+            data = request("tools/call", {"name": "list_servers", "arguments": {}})
+            statuses = {item["name"]: item for item in data.get("structuredContent", {}).get("servers", [])}
+            if all(statuses.get(name, {}).get("status") in ("up", "sleeping")
+                   and statuses[name].get("toolCount", 0) > 0 for name in servers):
+                break
+            time.sleep(2)
+        broken = []
+        for name in servers:
+            item = statuses.get(name, {})
+            print(f"MCP {name}: {item.get('status', 'missing')} ({item.get('toolCount', 0)} tools)")
+            if item.get("status") not in ("up", "sleeping") or not item.get("toolCount"):
+                broken.append(name)
+                continue
+            tools = request("tools/call", {"name": "list_tools", "arguments": {"server": name}})
+            count = len(tools.get("structuredContent", {}).get("tools", []))
+            if count == 0:
+                broken.append(name)
+        if broken:
+            die("MCP discovery failed for: " + ", ".join(broken))
+        print("MCP smoke test passed: all configured servers expose tools.")
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+
+def doctor(mode: str, live: bool, smoke: bool) -> None:
+    print(f"OS: {platform.system()} {platform.machine()}, Python {sys.version.split()[0]}")
+    servers = check_config()
+    print("MCP definitions:", ", ".join(servers))
+    node = node_bin()
+    print("Node:", node)
+    print("Hub installed:", "yes" if HUB.is_file() else "NO (run setup)")
+    for executable in ("npm", "uvx", "npx"):
+        print(executable + ":", shutil.which(executable) or "MISSING")
+    env = load_env()
+    print("Open Terminal key configured:", bool(env.get("OPEN_TERMINAL_API_KEY")))
+    for server, item in servers.items():
+        cmd = item.get("command")
+        if cmd and not shutil.which(cmd):
+            print(f"WARNING: {server}: executable not on PATH: {cmd}")
+    if mode == "openai":
+        print("OpenAI tunnel binary:", (LOCAL / "bin" / "tunnel-client").is_file() or bool(shutil.which("tunnel-client")))
+        print("Tunnel ID configured:", bool(env.get("CONTROL_PLANE_TUNNEL_ID")))
+        print("Runtime key configured:", bool(env.get("CONTROL_PLANE_API_KEY")))
+        if live:
+            subprocess.run(openai_cmd(env, doctor=True), cwd=ROOT, env=env, check=True)
+    else:
+        print("SSH installed:", bool(shutil.which("ssh")))
+        print("SSH target configured:", bool(env.get("SSH_TARGET")) and env.get("SSH_TARGET") != "user@your-vps")
+        print("External URL configured:", bool(env.get("EXTERNAL_URL")) and env.get("EXTERNAL_URL") != "https://mcp.example.com")
+        if live:
+            ssh_cmd(env)
+            http_hub_cmd(env)
+            print("Config validation: OK; SSH connection requires start.")
+    print("Note: Blender addon must be running in Blender; Chrome autoConnect needs remote debugging.")
+    if smoke:
+        smoke_mcp(env)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Private agent-first MCP Gateway for Ubuntu and macOS")
+    sub = parser.add_subparsers(dest="action", required=True)
+    for name in ("setup", "start", "doctor"):
+        p = sub.add_parser(name)
+        p.add_argument("--mode", choices=("openai", "ssh"), default="openai",
+                       help="openai: private Secure MCP Tunnel; ssh: VPS reverse tunnel + OAuth")
+        if name == "doctor":
+            p.add_argument("--smoke", action="store_true", help="run a read-only MCP protocol and tool discovery test")
+            p.add_argument("--live", action="store_true",
+                           help="also contact the OpenAI tunnel control-plane (requires credentials)")
+    args = parser.parse_args()
+    try:
+        if args.action == "setup":
+            setup(args.mode)
+        elif args.action == "start":
+            start(args.mode)
+        else:
+            doctor(args.mode, args.live, args.smoke)
+    except subprocess.CalledProcessError as exc:
+        die(f"Command failed with code {exc.returncode}: {exc.cmd}")
+
+
+if __name__ == "__main__":
+    main()
