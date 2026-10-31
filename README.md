@@ -5,7 +5,7 @@ Powered by [mcp-hub](https://github.com/ni-c/mcp-hub) (version pinned in `packag
 
 ## Architecture
 
-**Default (OpenAI private tunnel):** ChatGPT → OpenAI Secure MCP Tunnel → `tunnel-client` → `mcp-hub --stdio` → Blender / Open Terminal / Chrome DevTools / any configured MCP.
+**Default (OpenAI private tunnel):** ChatGPT → OpenAI Secure MCP Tunnel → `tunnel-client` → `mcp-hub --stdio` → only the MCP servers defined in `config/mcp.json`.
 
 - One local MCP configuration, one private ChatGPT connection.
 - No Cloudflare, domain, publicly exposed port, OAuth gateway, or VPS.
@@ -19,7 +19,7 @@ Powered by [mcp-hub](https://github.com/ni-c/mcp-hub) (version pinned in `packag
 
 ## Quick start (on Ubuntu or macOS)
 
-Prerequisites: Python 3.9+, Node.js 22+, npm/npx, [uv](https://docs.astral.sh/uv/) (`uvx`), Blender plus [mcp-for-blender add-on](https://github.com/ahujasid/blender-mcp), Chrome 144+ when using `--autoConnect`.
+Core prerequisites: Python 3.9+, Node.js 22+ and npm (Ubuntu or macOS). **No Blender, Chrome, or uv dependency unless you actually configure an MCP that requires it.** The agent should install/check only the prerequisites of the selected upstream MCPs.
 
 ```bash
 cd path/to/my-mcp-tools
@@ -27,7 +27,7 @@ cd path/to/my-mcp-tools
 ./mcp-bridge doctor --smoke
 ```
 
-`setup` installs pinned `@ni-c/mcp-hub` and an official versioned `tunnel-client` release matching Linux/macOS amd64/arm64, then creates a private `.env` file. To use your own preinstalled binary, set `TUNNEL_CLIENT=/absolute/path`.
+`setup` installs pinned `@ni-c/mcp-hub` and an official versioned `tunnel-client` release matching Linux/macOS amd64/arm64, creates private `.env` and an **empty local** `config/mcp.json` when absent. It never overwrites an existing MCP config or `.env`. The local config is Git-ignored. To use your own preinstalled binary, set `TUNNEL_CLIENT=/absolute/path`.
 
 Create or select a private tunnel at:
 
@@ -52,37 +52,62 @@ To stop, press Ctrl+C. The process terminates its managed child. Do not backgrou
 
 > **Availability and pricing:** OpenAI account/organization entitlements, regional availability, and any tunnel charges must be verified in the Platform UI. No universal free-cost guarantee. The default connection requires an outbound connection to `api.openai.com:443`; VPN routes work transparently and HTTP(S) proxies are supported via `HTTPS_PROXY` or the tunnel client's proxy settings.
 
-## MCP configuration
+## MCP configuration: the project is server-agnostic
 
-Edit `config/mcp.json` (standard `mcpServers` object). It currently contains:
-- `blender`: `uvx mcp-for-blender` (requires Blender add-on open and listening).
-- `terminal`: `uvx -q --from open-terminal[mcp]==0.14.7 python -c "from open_terminal.mcp_server import mcp; mcp.run(transport='stdio')"`. **Open Terminal requires an API key even on stdio; setup generates a strong key and injects it only into this child via mcp-hub config.** This direct entrypoint avoids the upstream CLI passing HTTP `host`/`port` arguments into the stdio transport.
-- `chrome-devtools`: `npx ... chrome-devtools-mcp --autoConnect` (enable `chrome://inspect/#remote-debugging` and confirm browser connection).
+**The bridge has no built-in MCPs.** Only `config/mcp.json` (a Git-ignored local file, using the standard `mcpServers` map) decides which upstreams run. `setup` creates an empty config when missing and never overwrites a current one. `config/mcp.example.json` contains three **optional examples**, not automatic defaults. Every stdio, Streamable HTTP or SSE MCP is optional; the core never installs or starts an MCP unless it appears in the local config.
 
-Example adding a remote MCP with headers:
+Example: **only Blender + Terminal**:
 
 ```json
 {
   "mcpServers": {
-    "my-service": {
-      "type": "http",
-      "url": "https://your-upstream.example/mcp",
-      "headers": { "Authorization": "Bearer ${UPSTREAM_MCP_TOKEN}" }
+    "blender": { "command": "uvx", "args": ["mcp-for-blender"] },
+    "terminal": {
+      "command": "uvx",
+      "args": ["-q", "--from", "open-terminal[mcp]==0.14.7", "python", "-c", "from open_terminal.mcp_server import mcp; mcp.run(transport='stdio')"],
+      "env": { "OPEN_TERMINAL_API_KEY": "${OPEN_TERMINAL_API_KEY}" }
     }
   }
 }
 ```
 
-**Merge** this server entry into the existing map; do not replace the rest. Set `UPSTREAM_MCP_TOKEN` in `.env` (or the process environment). Upstream MCP OAuth and legacy SSE are supported directly by mcp-hub. See [mcp-hub configuration](https://mcp-hub.ni-c.de/guide/configuration).
+To configure from examples: `cp config/mcp.example.json config/mcp.json`, then **remove every server you do not want**. Or leave the empty file created by `setup` and copy in only the entries you need. Do not edit the example for personal settings. Example package installation and GUI setup are up to the agent based on selected commands, **not** hardcoded in the bridge.
 
-The aggregate exposes **six meta-tools** on the `/hub` equivalent, so the model chooses server and tool via `list_servers` → `list_tools` → `call_tool`. It is not a direct list of every upstream tool in the connector. This is a deliberate mcp-hub design trade-off.
+For Open Terminal in this example, set `OPEN_TERMINAL_API_KEY` in local `.env` (e.g. generate a random key with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`). The bridge never guesses credentials for arbitrary MCPs. For Chrome autoConnect, enable remote debugging in Chrome and grant its permission; Blender needs its add-on running.
+
+Later, to enable Chrome DevTools, add this entry to the same `mcpServers` map:
+
+```json
+"chrome-devtools": {
+  "command": "npx",
+  "args": ["-y", "chrome-devtools-mcp@latest", "--autoConnect"]
+}
+```
+
+**Hot reload:** mcp-hub watches `config/mcp.json`, so adding or removing entries updates the running hub automatically. A newly configured server is launched on demand. You do **not** need a new tunnel, additional ChatGPT connector, or another domain. Make sure the file remains valid JSON during editing (prefer atomic saves). The existing ChatGPT connection still exposes the same six mcp-hub meta-tools; server discovery via `list_servers` reflects current config.
+
+Example remote HTTP MCP with a header:
+
+```json
+"remote-mcp": {
+  "type": "http",
+  "url": "https://example.org/mcp",
+  "headers": { "Authorization": "Bearer ${UPSTREAM_MCP_TOKEN}" }
+}
+```
+
+Set `UPSTREAM_MCP_TOKEN` in local `.env` or the process environment. Upstream OAuth and SSE are supported by mcp-hub too. See [mcp-hub configuration](https://mcp-hub.ni-c.de/guide/configuration).
+
+**Note:** Variables from `.env` are loaded at **bridge startup**. Changes to the JSON config hot-reload; adding a *new* environment variable to `.env` requires restarting the bridge so the new variable enters its process environment. `mcp-bridge doctor --smoke` checks tool discovery, using only configured MCPs.
+
+The aggregate exposes **six meta-tools**, so the model chooses server and tool via `list_servers` → `list_tools` → `call_tool`. It is not a direct list of every upstream tool in the connector.
 
 ### macOS notes
 
 - `setup` detects `Darwin arm64` (Apple Silicon) or `Darwin x86_64` (Intel) and downloads the matching official tunnel-client binary.
-- Install prerequisites using Homebrew, e.g. `brew install node uv python`, if missing.
+- Install core prerequisites using Homebrew, e.g. `brew install node python`, if missing; install `uv` only if one of the selected MCPs needs it.
 - macOS may prompt for permissions to allow Blender, Chrome, or Terminal access.
-- For Chrome `--autoConnect`, you must use supported Chrome and enable remote debugging. If unavailable, configure the MCP with `--headless` or `--browserUrl` instead.
+- If Chrome DevTools is **configured**, `--autoConnect` needs supported Chrome and remote debugging. Otherwise Chrome is not required at all.
 - Avoid absolute Linux paths in MCP definitions; `uvx`, `npx`, and config path resolve via environment.
 
 ## SSH/VPS fallback
@@ -123,10 +148,10 @@ Unlike OpenAI Secure MCP Tunnel, SSH fallback publishes one authenticated HTTPS 
 
 ## Safety
 
-**Treat Terminal, Blender, browser debugging and third-party MCP servers as full local-machine privileges.** An agent connected through these tools can modify or delete files, execute shell commands, or read browser content.
+**Treat configured local MCP servers (especially Terminal, Blender or browser debugging) as potentially having full local-machine privileges.** An agent connected through these tools can modify or delete files, execute shell commands, or read browser content.
 
 - Private ChatGPT connector does not mean safe commands: use explicit human approval for destructive actions.
-- Avoid untrusted third-party MCP packages; review and pin each version. The default Blender and Chrome entries should be pinned after verifying versions on target OS.
+- Avoid untrusted third-party MCP packages; review and pin each version. Version-pin third-party MCP packages after verifying compatibility with the target OS.
 - `mcp-hub --stdio` runs local subprocesses as the signed-in user. No sandbox.
 - Never commit `.env`, OAuth client state, keys or tunnel profiles. `.gitignore` excludes those.
 - Legacy Cloudflare configuration is **not part of the portable project** and must not be shared. If migrating from a prior setup with embedded tokens, rotate those credentials.

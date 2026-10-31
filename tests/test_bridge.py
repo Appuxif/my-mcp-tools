@@ -13,9 +13,30 @@ m = runpy.run_path(str(ROOT / "mcp-bridge"))
 
 
 class BridgeTests(unittest.TestCase):
-    def test_config_has_three_servers(self):
-        servers = m["check_config"]()
-        self.assertTrue({"blender", "terminal", "chrome-devtools"}.issubset(servers))
+    def test_config_empty_is_allowed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "config.json"
+            file.write_text(json.dumps({"mcpServers": {}}))
+            with patch.dict(m["check_config"].__globals__, {"CONFIG": file}):
+                self.assertEqual(m["check_config"](), {})
+
+    def test_config_selects_exactly_requested_servers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            file = Path(tmp) / "config.json"
+            file.write_text(json.dumps({"mcpServers": {
+                "blender": {"command": "uvx", "args": ["mcp-for-blender"]},
+                "terminal": {"command": "uvx", "args": ["open-terminal"]}
+            }}))
+            with patch.dict(m["check_config"].__globals__, {"CONFIG": file}):
+                servers = m["check_config"]()
+                self.assertEqual(list(servers), ["blender", "terminal"])
+                self.assertNotIn("chrome-devtools", servers)
+
+    def test_example_is_not_a_live_config(self):
+        example = json.loads((ROOT / "config" / "mcp.example.json").read_text())
+        self.assertEqual(set(example["mcpServers"]), {"blender", "terminal", "chrome-devtools"})
+        ignore = (ROOT / ".gitignore").read_text().splitlines()
+        self.assertIn("config/mcp.json", ignore)
 
     def test_mcp_hub_binary_installed(self):
         if m["HUB"].is_file():

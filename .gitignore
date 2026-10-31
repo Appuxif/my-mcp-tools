@@ -5,6 +5,7 @@
 .local/
 data/
 config/.mcp-hub/
+config/mcp.json
 .mcp-hub/
 
 # Installed dependencies and platform caches
@@ -21,3 +22,6 @@ cloudflare/
 *.zip
 *.tar.gz
 *.log
+
+# IDE configuration
+.idea/
