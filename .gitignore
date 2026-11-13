@@ -25,3 +25,4 @@ cloudflare/
 
 # IDE configuration
 .idea/
+/tools/pytdjson/
