@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pointer Lab — тест точности мыши</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b111b; --surface:#121d2b; --line:#2b3b50; --ink:#e8eff8; --muted:#94a7bd; --cyan:#65e2d4; --good:#76e7a6; --bad:#ff8c96; --gold:#ffd18e; }
+    * { box-sizing: border-box; }
+    html, body { width:100%; height:100%; min-height:480px; margin:0; overflow:hidden; }
+    body { font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background: radial-gradient(ellipse at 55% 45%, #142238 0%,var(--bg) 73%); user-select:none; }
+    #field { position:fixed; inset:0; overflow:hidden; background-image:linear-gradient(#ffffff07 1px, transparent 1px),linear-gradient(90deg,#ffffff07 1px,transparent 1px); background-size:40px 40px; }
+    #field::after { content:"";position:absolute;inset:0; pointer-events:none; background:radial-gradient(ellipse at center,transparent 54%,#02081459 100%); }
+    .target { --size:34px; position:absolute; width:var(--size);height:var(--size); transform:translate(-50%,-50%); display:grid;place-items:center; padding:0; color:#a7c4db; font:600 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.2px; background:#172b40; border:1px solid #3c5872; border-radius:7px; box-shadow:0 3px 12px #0007,inset 0 0 0 1px #ffffff08; cursor:crosshair; transition:background .12s,border .12s,transform .12s,box-shadow .12s; z-index:1; touch-action:manipulation; }
+    .target::before { content:"";position:absolute; width:4px;height:4px;top:50%;left:50%; transform:translate(-50%,-50%); background:#c8fdf8;border-radius:50%; box-shadow:0 0 5px #8ae6e9; }
+    .target span { position:absolute; transform:translateY(22px); color:#5a728b; font-size:9px;pointer-events:none; }
+    .target:hover { border-color:var(--cyan); background:#22516a; box-shadow:0 0 16px #4ac6bd52; }
+    .target:active { transform:translate(-50%,-50%) scale(.91); }
+    .target.hit { background:#204e42; border-color:var(--good); box-shadow:0 0 0 4px #55d9a229; }
+    .target.wrong { background:#522d39; border-color:var(--bad); }
+    .target.focus-target { border:2px solid var(--gold); box-shadow:0 0 0 5px #ffd18e2b, 0 0 22px #ffd18e3c; animation:breathe 1.7s infinite; }
+    @keyframes breathe { 50% { box-shadow:0 0 0 8px #ffd18e11,0 0 32px #ffd18e44; } }
+    .hud { position:fixed;top:18px;left:18px; width:314px; z-index:10; padding:19px; border:1px solid #3e5167; border-radius:16px; background:#101c2af0; box-shadow:0 16px 44px #0008; backdrop-filter:blur(12px); }
+    .eyebrow { font-size:10px;font-weight:750;letter-spacing:2.8px;color:var(--cyan); }
+    h1 { font-size:23px; line-height:1.1; letter-spacing:-.7px; margin:6px 0 8px; }
+    .intro { color:var(--muted); margin:0 0 16px; font-size:12px; }
+    .toolbar { display:flex; flex-wrap:wrap; gap:7px;margin-bottom:13px; }
+    button.control { padding:8px 11px; border:1px solid #425670;border-radius:9px; background:#203148;color:#e3edfa;font:600 11px system-ui;cursor:pointer; }
+    button.control:hover { background:#2f4863; }
+    button.control.selected { color:#031b1b;border-color:#61dfd0;background:var(--cyan); }
+    .stats { display:grid;grid-template-columns:repeat(3,1fr); gap:7px; }
+    .stat { padding:11px 8px 9px;border:1px solid #304157;background:#0d1725;border-radius:10px;text-align:center; }
+    .stat b { display:block;font:700 22px/1.1 ui-monospace,Consolas,monospace; }
+    .stat small {color:var(--muted);font-size:10px;}
+    .stat:nth-child(2) b { color:var(--good); }
+    .stat:nth-child(3) b { color:var(--gold); }
+    #status { min-height:36px; margin:13px 0 5px;font-size:12px;color:#d0dfed; }
+    .meta { border-top:1px solid #2b3c4e;padding-top:10px;margin-top:5px;color:var(--muted); font:11px/1.65 ui-monospace,Consolas,monospace; }
+    .meta strong { color:#e1effc;font-weight:500; }
+    .history { max-height:98px;overflow:hidden;display:flex;flex-direction:column;gap:3px;margin-top:8px; }
+    .logline { display:flex;justify-content:space-between;gap:8px;color:#9fb5cc;font:10px/1.6 ui-monospace,Consolas,monospace; }
+    .logline.ok strong { color:var(--good); } .logline.bad strong { color:var(--bad); }
+    .hint { position:fixed;z-index:4;right:20px;top:21px;text-align:right; color:#9fb2c8;background:#101a28c9;border:1px solid #2b3d53;border-radius:12px;padding:10px 14px;font-size:11px;pointer-events:none; }
+    .hint b { color:var(--cyan); }
+    .footer { position:fixed;z-index:4;bottom:17px;right:19px; padding:8px 13px; color:#8099b3;background:#0c1521c7;border:1px solid #2a3a4b;border-radius:9px;font:11px ui-monospace,Consolas,monospace;pointer-events:none; }
+    .marker { --mark:var(--good);position:fixed; z-index:20; width:22px;height:22px; transform:translate(-50%,-50%); border:2px solid var(--mark); border-radius:50%;pointer-events:none; animation:blip .8s ease-out forwards; }
+    .marker::before,.marker::after { content:"";position:absolute;background:var(--mark); }
+    .marker::before {width:1px;height:30px;top:-6px;left:9px}
+    .marker::after {height:1px;width:30px;left:-6px;top:9px}
+    @keyframes blip { to { opacity:0;transform:translate(-50%,-50%) scale(1.9); } }
+    @media(max-width:700px) { .hud{width:260px;padding:13px;left:10px;top:10px} h1{font-size:19px} .intro{font-size:11px} .hint{display:none} .target{--size:30px} }
+  </style>
+</head>
+<body>
+  <main id="field" aria-label="Поле проверки кликов"></main>
+  <section class="hud" aria-label="Панель точности">
+    <div class="eyebrow">MOUSE / POINTER LAB</div>
+    <h1>Точность кликов</h1>
+    <p class="intro">Маленькие мишени по всему экрану. Целься в светлую точку в центре каждого блока.</p>
+    <div class="toolbar">
+      <button class="control selected" id="free">Свободно</button>
+      <button class="control" id="route">По маршруту</button>
+      <button class="control" id="reset">Сбросить</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><b id="hits">0</b><small>Попаданий</small></div>
+      <div class="stat"><b id="accuracy">—</b><small>Точность</small></div>
+      <div class="stat"><b id="avg">—</b><small>Ср. ошибка, px</small></div>
+    </div>
+    <div id="status">Нажми на любой блок, чтобы начать.</div>
+    <div class="meta">
+      <div>Экран браузера: <strong id="viewport">—</strong></div>
+      <div>Последний клик: <strong id="point">—</strong></div>
+      <div>Отклонение: <strong id="delta">—</strong></div>
+      <div>Текущая цель: <strong id="next">свободный выбор</strong></div>
+    </div>
+    <div class="history" id="history"></div>
+  </section>
+  <div class="hint"><b>54 позиции</b> · весь viewport<br>Режим «По маршруту» проверяет<br>попадания по выбранным мишеням</div>
+  <div class="footer">Координаты в CSS-пикселях · D = расстояние от центра</div>
+  <script>
+    (() => {
+      'use strict';
+      const field = document.getElementById('field');
+      const $ = id => document.getElementById(id);
+      const COLS=10, ROWS=6;
+      const targets=[];
+      let route=[], index=0, mode='free', hits=0, attempts=0, sumDistance=0, routeHits=0;
+      const round = n => Math.round(n*10)/10;
+      const coord = (x,y) => Math.round(x)+', '+Math.round(y);
+      const hash = n => ((n*9301+49297)%233280)/233280;
+      function makeTargets() {
+        for(let row=0;row<ROWS;row++){
+          for(let col=0;col<COLS;col++){
+            const id=row*COLS+col+1;
+            const x=((col+.5+((hash(id*7)-.5)*.21))/COLS)*100;
+            const y=((row+.5+((hash(id*17)-.5)*.25))/ROWS)*100;
+            const px=x/100*innerWidth, py=y/100*innerHeight;
+            const hud=document.querySelector('.hud').getBoundingClientRect();
+            const hint=document.querySelector('.hint').getBoundingClientRect();
+            const overlaps=(r,pad,extraBottom=0)=>px>=r.left-pad && px<=r.right+pad && py>=r.top-pad && py<=r.bottom+pad+extraBottom;
+            // The stats panel grows when history fills. Reserve room for its final size.
+            if(overlaps(hud,30,100) || overlaps(hint,25))continue;
+            const el=document.createElement('button');
+            el.type='button'; el.className='target'; el.dataset.id=String(id);
+            el.title='Мишень #'+id; el.setAttribute('aria-label','Мишень '+id);
+            el.style.left=x+'%'; el.style.top=y+'%';
+            el.innerHTML='<span>'+String(id).padStart(2,'0')+'</span>';
+            field.append(el);
+            targets.push(el);
+          }
+        }
+        document.querySelector('.hint b').textContent=targets.length+' позиций';
+      }
+      function updateDimensions(){ $('viewport').textContent=innerWidth+' × '+innerHeight; }
+      function record(e,el) {
+        const correct=!!el && (mode==='free'||el===route[index]);
+        attempts++;
+        const rect=el?.getBoundingClientRect();
+        const cx=rect ? rect.left+rect.width/2 : null;
+        const cy=rect ? rect.top+rect.height/2 : null;
+        const dx=cx===null?null:e.clientX-cx;
+        const dy=cy===null?null:e.clientY-cy;
+        const distance=cx===null?null:Math.hypot(dx,dy);
+        if(correct){
+          hits++;sumDistance+=distance;
+          el.classList.add('hit');setTimeout(()=>el.classList.remove('hit'),500);
+          if(mode==='route'){routeHits++;index++; if(index>=route.length)index=0;markActive();}
+        } else if(el) {
+          el.classList.add('wrong');setTimeout(()=>el.classList.remove('wrong'),500);
+        }
+        $('hits').textContent=String(hits);
+        $('accuracy').textContent=Math.round(hits/attempts*100)+'%';
+        $('avg').textContent=hits?round(sumDistance/hits):'—';
+        $('point').textContent=coord(e.clientX,e.clientY);
+        $('delta').textContent=distance===null?'мимо мишени':round(distance)+' px ('+round(dx)+', '+round(dy)+')';
+        $('status').textContent=correct
+          ? '✓ '+(el.title)+' — '+round(distance)+' px от центра'
+          : (mode==='route'?'✗ Нужна подсвеченная мишень':'✗ Промах мимо всех блоков');
+        const line=document.createElement('div');
+        line.className='logline '+(correct?'ok':'bad');
+        line.innerHTML='<span>'+new Date().toLocaleTimeString('ru-RU')+' · '+(el?'#'+el.dataset.id:'фон')+'</span><strong>'+ (correct?'✓ '+round(distance)+'px':'✗ промах')+'</strong>';
+        $('history').prepend(line);
+        while($('history').children.length>5)$('history').lastChild.remove();
+        const marker=document.createElement('i');
+        marker.className='marker'; marker.style.left=e.clientX+'px';marker.style.top=e.clientY+'px';
+        if(!correct)marker.style.setProperty('--mark','var(--bad)');
+        document.body.append(marker);setTimeout(()=>marker.remove(),810);
+        // Machine-readable state for external automation: screen CSS coords and target centres.
+        window.pointerLabResults.push({id:el?.dataset.id??null,success:correct,
+          x:e.clientX,y:e.clientY,targetX:cx,targetY:cy,
+          dx,dy,distance,screenX:e.screenX,screenY:e.screenY,time:Date.now()});
+      }
+      function markActive(){
+        targets.forEach(el=>el.classList.remove('focus-target'));
+        if(mode==='route'){
+          route[index].classList.add('focus-target');
+          $('next').textContent='#'+route[index].dataset.id+' ('+(routeHits+1)+' успешных)';
+        } else {$('next').textContent='свободный выбор';}
+      }
+      function reset(){
+        hits=0;attempts=0;sumDistance=0;routeHits=0;index=0;
+        window.pointerLabResults=[];
+        $('hits').textContent='0';$('accuracy').textContent='—';$('avg').textContent='—';
+        $('point').textContent='—';$('delta').textContent='—';$('history').replaceChildren();
+        $('status').textContent=mode==='route'?'Попади в подсвеченную мишень':'Нажми на любой блок, чтобы начать.';
+        route=[...targets].sort((a,b)=>a.dataset.id.localeCompare(b.dataset.id));
+        markActive();
+      }
+      document.addEventListener('pointerdown', e => {
+        if(e.button!==0 || e.target.closest('.hud'))return;
+        const el=e.target.closest('.target');
+        record(e,el);
+      });
+      $('free').addEventListener('click',()=>{
+        mode='free';$('free').classList.add('selected');$('route').classList.remove('selected');reset();
+      });
+      $('route').addEventListener('click',()=>{
+        mode='route';$('route').classList.add('selected');$('free').classList.remove('selected');reset();
+      });
+      $('reset').addEventListener('click',reset);
+      window.pointerLabResults=[];
+      window.pointerLabTargets=()=>targets.map(el=>{let r=el.getBoundingClientRect();return {id:Number(el.dataset.id),x:round(r.left+r.width/2),y:round(r.top+r.height/2)}});
+      window.addEventListener('resize',updateDimensions);
+      makeTargets();updateDimensions();reset();
+    })();
+  </script>
+</body>
+</html>
