@@ -1,0 +1,38 @@
+{
+  "name": "dev-6ae5df3555ac8191aae4fe2dfb908a81",
+  "version": "1.1.0",
+  "description": "Персональные MCP-инструменты для Ubuntu Desktop, Blender, Chrome DevTools и терминала с руководствами по автоматизации рабочих процессов.",
+  "author": {
+    "name": "My MCP Tools"
+  },
+  "keywords": [
+    "mcp",
+    "computer-use",
+    "ubuntu",
+    "blender",
+    "browser-automation",
+    "chrome-devtools",
+    "terminal",
+    "development"
+  ],
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "My MCP",
+    "shortDescription": "Ubuntu, Blender, Chrome и CLI",
+    "longDescription": "Подключает личные MCP-инструменты для управления компьютером Ubuntu, работы с Blender и 3D-сценами, автоматизации Chrome через DevTools, терминальных команд и файловых операций. Включает практические инструкции для выбора подходящего инструмента, последовательностей действий, ожидания изменений интерфейса, проверки результата и безопасной работы с существующими проектами. Требует предварительно подключённого My MCP Tools.",
+    "developerName": "My MCP Tools",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Управление рабочим столом Ubuntu",
+      "Моделирование и анимация в Blender",
+      "Автоматизация и отладка Chrome",
+      "Работа с терминалом и файлами"
+    ],
+    "defaultPrompt": [
+      "Посмотри, какое приложение сейчас активно в Ubuntu, и помоги выполнить в нём задачу.",
+      "Изучи текущую сцену Blender и предложи безопасный план моделирования или анимации.",
+      "Проверь открытую страницу Chrome через DevTools: DOM, консоль и ошибки загрузки."
+    ]
+  },
+  "skills": "./skills/"
+}
