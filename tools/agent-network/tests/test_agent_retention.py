@@ -105,28 +105,32 @@ class AgentDeletionHttpTests(unittest.TestCase):
         self.client_context.__exit__(None, None, None)
         self.tmp.cleanup()
 
-    def test_delete_requires_dashboard_credentials_and_frees_name(self):
-        d=self.client.post("/api/v1/dashboard-agent/enable",
-                           json={"name":"dashboard-owner"}).json()
-        agent=self.client.post("/api/v1/agents/register",json={
-            "name":"stale-target","role":"frontend","kind":"chatgpt",
+    def test_delete_without_dashboard_agent_frees_name(self):
+        agent = self.client.post("/api/v1/agents/register", json={
+            "name": "stale-target", "role": "frontend", "kind": "chatgpt",
         }).json()
-        aid=agent["agent"]["agent_id"]
-        url="/api/v1/dashboard/agents/"+aid
-        self.assertEqual(self.client.delete(url).status_code,401)
-        self.assertEqual(self.client.delete(url, headers={"X-Agent-Id":d["agent"]["agent_id"],
-                                                          "X-Agent-Token":"wrong"}).status_code,403)
-        headers={"X-Agent-Id":d["agent"]["agent_id"], "X-Agent-Token":d["token"]}
-        self.assertEqual(self.client.delete(url,headers={**headers,"Origin":"https://evil.site"}).status_code,403)
-        response=self.client.delete(url,headers=headers)
-        self.assertEqual(response.status_code,200,response.text)
-        self.assertEqual(response.json()["name"],"stale-target")
-        self.assertFalse(response.json()["deleted_self"])
-        self.assertEqual(self.client.delete(url,headers=headers).status_code,404)
-        new=self.client.post("/api/v1/agents/register",json={
-            "name":"stale-target","role":"another","kind":"other",
+        aid = agent["agent"]["agent_id"]
+        url = "/api/v1/dashboard/agents/" + aid
+
+        # Deletion is independent from the Dashboard Agent toggle/identity.
+        self.assertEqual(self.client.delete(
+            url, headers={"Origin": "https://evil.site"}
+        ).status_code, 403)
+        self.assertEqual(self.client.delete(
+            url, headers={"Sec-Fetch-Site": "cross-site"}
+        ).status_code, 403)
+        self.assertEqual(self.client.delete(
+            url, headers={"Host": "remote.example"}
+        ).status_code, 403)
+
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["name"], "stale-target")
+        self.assertEqual(self.client.delete(url).status_code, 404)
+        replacement = self.client.post("/api/v1/agents/register", json={
+            "name": "stale-target", "role": "another", "kind": "other",
         }).json()
-        self.assertNotEqual(new["agent"]["agent_id"],aid)
+        self.assertNotEqual(replacement["agent"]["agent_id"], aid)
 
     def test_self_delete_invalidates_dashboard_identity(self):
         d=self.client.post("/api/v1/dashboard-agent/enable",
@@ -135,7 +139,7 @@ class AgentDeletionHttpTests(unittest.TestCase):
         auth={"X-Agent-Id":did,"X-Agent-Token":d["token"]}
         response=self.client.delete("/api/v1/dashboard/agents/"+did,headers=auth)
         self.assertEqual(response.status_code,200)
-        self.assertTrue(response.json()["deleted_self"])
+        self.assertEqual(response.json()["name"], "dashboard-self")
         self.assertEqual(self.client.get("/api/v1/dashboard-agent/inbox",headers=auth).status_code,403)
         replacement=self.client.post("/api/v1/dashboard-agent/enable",
                                      json={"name":"dashboard-self"})
@@ -169,15 +173,13 @@ class AgentDeletionHttpTests(unittest.TestCase):
         target=self.client.post("/api/v1/agents/register",json={
             "name":"ws-agent","role":"test","kind":"chatgpt",
         }).json()
-        headers={"X-Agent-Id":operator["agent"]["agent_id"],
-                 "X-Agent-Token":operator["token"]}
         with self.client.websocket_connect("/api/v1/channels/ws") as ws:
             ws.send_json({"type":"register","kind":"chatgpt","state":"idle",
                           "agent_id":target["agent"]["agent_id"],
                           "token":target["token"]})
             self.assertEqual(ws.receive_json()["type"],"registered")
             result=self.client.delete("/api/v1/dashboard/agents/"+
-                                      target["agent"]["agent_id"],headers=headers)
+                                      target["agent"]["agent_id"])
             self.assertEqual(result.status_code,200)
             self.assertEqual(self.app.state.broker.connections,{})
             with self.app.state.store.lock:

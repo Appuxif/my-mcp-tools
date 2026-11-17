@@ -172,6 +172,7 @@
     const agent = data.agents.find(a => a.agent_id === selectedId);
     const deleteButton = $('delete-agent');
     deleteButton.hidden = !agent;
+    deleteButton.disabled = !agent;
     deleteButton.dataset.agentId = agent?.agent_id || '';
     deleteButton.dataset.agentName = agent?.name || '';
     if (!agent) {

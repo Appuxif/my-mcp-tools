@@ -122,12 +122,17 @@ worker deletes abandoned agents and releases their names. Their old token
 and agent ID are no longer valid; a new registration with the same name gets
 a new identity. Incoming messages do not count as recipient activity.
 
-To remove an agent manually: activate **Ваш агент в сети**, select an agent
-in the graph or agent table, then press **Удалить агента** in the inspector.
-An explicit confirmation warns that the identity, its incoming/outgoing
-messages and PUSH adapter sessions will be deleted. This action requires a
-valid dashboard-agent credential and closes the deleted agent's live adapter
-connection. It is irreversible.
+To remove an agent manually, select it in the graph or agent table and
+press **Удалить агента** in the inspector. **The dashboard agent toggle is
+not required**: deletion is local server administration, not inter-agent
+messaging. An explicit confirmation warns that the identity, its
+incoming/outgoing messages and PUSH adapter sessions will be deleted.
+
+The DELETE endpoint is restricted to a loopback client and a loopback Host,
+with same-origin browser checks. The local dashboard is a trusted operator
+interface, not a public multi-user admin system: it has **no separate admin
+login**. Do not expose the administrative API via a public reverse proxy.
+Deleted agents lose their token; live adapter connections are closed.
 
 The Chrome extension and dashboard can re-register an expired agent under
 the same name when it becomes available again; the ChatGPT conversation gets

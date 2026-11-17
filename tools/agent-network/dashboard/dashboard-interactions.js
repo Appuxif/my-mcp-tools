@@ -59,10 +59,6 @@
   };
   function showEnabled() {
     const enabled = active();
-    $('delete-agent').disabled = !enabled;
-    $('delete-agent').title = enabled
-      ? 'Удалить выбранного агента и его сообщения'
-      : 'Для удаления включите агента дашборда';
     $('dashboard-toggle').checked = enabled;
     $('dashboard-name').disabled = !!identity?.agent_id;
     if (identity?.name) $('dashboard-name').value = identity.name;
@@ -315,10 +311,6 @@
   }
 
   async function deleteSelectedAgent() {
-    if (!active()) {
-      status('Включите агента дашборда для удаления других агентов', true);
-      return;
-    }
     const button = $('delete-agent');
     const targetId = button.dataset.agentId;
     const targetName = button.dataset.agentName;
@@ -333,9 +325,9 @@
     try {
       const result = await api(
         '/api/v1/dashboard/agents/' + encodeURIComponent(targetId),
-        {method:'DELETE'}, true
+        {method:'DELETE'}
       );
-      if (result.deleted_self) {
+      if (targetId === identity?.agent_id) {
         identity = null;
         saveIdentity();
         $('dashboard-name').value = '';
@@ -343,12 +335,16 @@
       }
       status('Удалён агент «' + result.name + '», связанных сообщений: ' +
              result.deleted_messages);
+      button.dataset.agentId = '';
+      button.dataset.agentName = '';
+      button.hidden = true;
       document.dispatchEvent(new CustomEvent('agent-network:refresh'));
       void refreshHistories();
     } catch (error) {
       status('Удаление: ' + String(error.message || error), true);
     } finally {
-      button.disabled = !active();
+      // Inspector refresh hides the button if its selected agent is gone.
+      button.disabled = !button.dataset.agentId;
     }
   }
 

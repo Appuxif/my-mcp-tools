@@ -360,18 +360,27 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.delete("/api/v1/dashboard/agents/{target_agent_id}")
     async def dashboard_delete_agent(target_agent_id: str, req: Request) -> dict:
-        """Delete a named agent and its messages; dashboard operator only.
+        """Local dashboard administration; no agent registration required.
 
-        A human must explicitly confirm deletion in the dashboard UI.
-        Invalidates the agent's token and frees its name for new registrations.
+        Unlike messaging, deletion is a dashboard administrative action. It is
+        only available on the loopback listener, with the existing same-origin
+        browser checks. Never expose this endpoint through a public proxy.
+        The UI requires explicit confirmation before calling it.
         """
-        operator_id, _ = dashboard_credentials(req)
+        require_dashboard_origin(req)
+        host = (req.url.hostname or "").lower()
+        peer = req.client.host if req.client else ""
+        if host not in ("localhost", "127.0.0.1", "::1") or peer not in (
+            "localhost", "127.0.0.1", "::1", "testclient"
+        ):
+            raise HTTPException(
+                403, "Agent deletion is available only on the local dashboard"
+            )
         try:
             result = store.delete_agent(target_agent_id)
         except ValueError as exc:
             raise HTTPException(404, str(exc)) from exc
         await broker.disconnect_agent(target_agent_id)
-        result["deleted_self"] = target_agent_id == operator_id
         return result
 
     @app.post("/api/v1/dashboard-agent/enable")
