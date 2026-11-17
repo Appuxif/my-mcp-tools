@@ -62,6 +62,19 @@ class DashboardHttpTests(unittest.TestCase):
                 page = client.get("/dashboard")
                 self.assertEqual(page.status_code, 200)
                 self.assertIn("Карта взаимодействий", page.text)
+                self.assertIn('/dashboard-assets/favicon.ico', page.text)
+                self.assertIn('/dashboard-assets/favicon-32.png', page.text)
+                for filename, content_type in (
+                    ('favicon.ico', 'image/vnd.microsoft.icon'),
+                    ('favicon-16.png', 'image/png'),
+                    ('favicon-32.png', 'image/png'),
+                    ('favicon-48.png', 'image/png'),
+                ):
+                    with self.subTest(asset=filename):
+                        icon=client.get('/dashboard-assets/'+filename)
+                        self.assertEqual(icon.status_code,200)
+                        self.assertEqual(icon.headers['Content-Type'],content_type)
+                        self.assertGreater(len(icon.content),100)
                 self.assertIn("Content-Security-Policy", page.headers)
                 self.assertIn("no-store", page.headers["Cache-Control"])
                 js = client.get("/dashboard-assets/dashboard.js")
