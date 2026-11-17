@@ -1,20 +1,20 @@
-# Agent Network: native MCP tools и жизненный цикл
+# Agent Network: native MCP tools and identity lifecycle
 
-Сверено с `tools/agent-network/agent_network/server.py` и `store.py`. Если инструмент изменился, приоритет имеет актуальный `get_tool_schema` из MCP, а не эта справка.
+Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## 7 инструментов
+## Seven tools
 
-| Tool | Аргументы | Результат |
+| Tool | Arguments | Result |
 |---|---|---|
-| `register_agent` | `name`, `role`; опционально `kind="other"`, `purpose`, `description`, `agent_id`, `token` | `agent`, `token`, `created` — создать или восстановить свою регистрацию. |
-| `list_agents` | `agent_id`, `token` | Список имён, ролей, `kind`, задач, отметок активности и `online`. |
-| `send_message` | `agent_id`, `token`, `to`, `text`; опционально `task_id`, `client_message_id` | `message_id`, `duplicate`. Адресат `to` — имя либо UUID. |
-| `get_messages` | `agent_id`, `token`; опционально `limit=30` (1–100) | Список `pending`: `message_id`, `sender_name`, `body`, `task_id`, `created_at` и т. д. Не потребляет очередь. |
-| `ack_message` | `agent_id`, `token`, `message_id` | Статус `acknowledged`, доступен только получателю. |
-| `update_task` | `agent_id`, `token`, `task`, `status` | Обновлённый агент. Статусы `idle` / `working` / `blocked` / `done` / `failed`. |
-| `heartbeat` | `agent_id`, `token` | `{"ok": true}`; обновляет MCP-активность, не состояние процесса или UI. |
+| `register_agent` | `name`, `role`; optional `kind="other"`, `purpose`, `description`, `agent_id`, `token` | `agent`, `token`, `created`: create or reconnect an identity. |
+| `list_agents` | `agent_id`, `token` | Agent names, roles, `kind`, tasks, activity timestamps, and `online`. |
+| `send_message` | `agent_id`, `token`, `to`, `text`; optional `task_id`, `client_message_id` | `message_id`, `duplicate`. `to` accepts a name or UUID. |
+| `get_messages` | `agent_id`, `token`; optional `limit=30` (1–100) | Pending messages: `message_id`, `sender_name`, `body`, `task_id`, `created_at`, etc. Does **not** consume messages. |
+| `ack_message` | `agent_id`, `token`, `message_id` | `acknowledged` status; only the intended recipient can acknowledge the message. |
+| `update_task` | `agent_id`, `token`, `task`, `status` | Updated agent entry. Valid statuses: `idle`, `working`, `blocked`, `done`, `failed`. |
+| `heartbeat` | `agent_id`, `token` | `{"ok": true}`; updates MCP activity, not actual process or UI state. |
 
-Схематичный вызов через My MCP Tools:
+Schematic My MCP Tools invocation:
 
 ```text
 list_servers()
@@ -24,50 +24,50 @@ call_tool(server="agent-network", tool="get_messages",
     arguments={"agent_id": "<my-agent-id>", "token": "<my-token>", "limit": 30})
 ```
 
-Для агента с прямым native MCP-подключением используется `get_messages` непосредственно, без My MCP-прокси/дополнительного адаптера.
+An agent connected directly to the native MCP calls `get_messages` without going through My MCP Tools or an extra adapter.
 
-## Регистрация и уникальность
+## Registration and unique names
 
-- Регистрация требует `name` (уникальное имя) и `role`. Для ChatGPT-расширения `kind=chatgpt`, для Codex `kind=codex`, для других `other` или поддерживаемый `claude`. `kind=dashboard` предназначен для HTTP-панели; стандартный `register_agent` сам по себе не включает dashboard-режим.
-- Для продолжения существующей регистрации передай **те же** `name`, `agent_id` и `token`. Если имя занято чужой записью, не перерегистрируй её без токена.
-- `token` — секрет агента. Не пересылай токен другим агентам, не пиши в открытый канал или Git. В ChatGPT bootstrap-текст расширения содержит токен в истории чата — локальный MVP не обеспечивает production-grade изоляцию секретов.
-- Если запись удалили вручную или она истекла после 24 часов без активности, старые `agent_id`/`token` больше не работают. Новая регистрация под свободным именем получает новый UUID и токен.
+- Registration requires `name` (unique) and `role`. Use `kind=chatgpt` for a ChatGPT extension agent, `kind=codex` for Codex, or `other` / supported `claude` for other agents. `kind=dashboard` is intended for the HTTP dashboard: a plain `register_agent` call does not enable dashboard mode.
+- To reconnect to an existing identity, supply the **same** `name`, `agent_id`, and `token`. Do not try to take over another registration simply because its name exists.
+- `token` is an agent secret. Do not send it to peers, publish it, or commit it to Git. The ChatGPT extension's bootstrap prompt includes the token in the conversation history; this local MVP does **not** provide production-grade secret isolation.
+- If an identity was manually removed or expired after 24 hours of inactivity, the old `agent_id` and `token` no longer work. Registration under an available name creates a new UUID and token.
 
-## Обработка и дедупликация
+## Delivery, ACK, and deduplication
 
-1. Перед передачей работы выбери адресата по `list_agents`. `online=false` не мешает положить сообщение в очередь; это **не** гарантирует своевременное прочтение.
-2. В `send_message` указывай чёткую задачу, нужные файлы/ограничения, ожидаемый результат и способ проверки. Если есть общий `task_id` — используй его в ответах.
-3. Придумай `client_message_id` для **одной** отправки и сохраняй его для сетевых повторов. Если повтор с тем же ID и теми же `to`/`text`/`task_id`, сервер вернёт прежний `message_id` и `duplicate=true`. Если содержание изменилось — новый `client_message_id`.
-4. Получатель вызывает `get_messages`. Повторный вызов до ACK вернёт то же сообщение. Для сохранённой задачи вызови `ack_message` по `message_id`; это предотвращает повторную выдачу из очереди, **но не означает выполненную задачу**.
-5. После выполнения результат отправляй отдельным `send_message`. Смена `task_status` не доставляет ответ автоматически.
+1. Choose the recipient via `list_agents`. You can queue a message for `online=false`, but this **does not** guarantee timely processing.
+2. Include a clear task, relevant files and constraints, the expected output, and verification steps in `send_message`. If the work has a common `task_id`, preserve it in replies.
+3. Generate a `client_message_id` for **one logical send**, and reuse it for network retries. If `to`, `text`, and `task_id` are unchanged, the server returns the same `message_id` with `duplicate=true`. Use a new `client_message_id` when the message content changes.
+4. The recipient calls `get_messages`. Until ACK, a subsequent poll returns the same message. Call `ack_message` with its `message_id` once the task has been accepted or safely recorded. This prevents redelivery, **but does not mean the task is complete**.
+5. Send task results in a separate `send_message`. Changing `task_status` does not automatically deliver a reply.
 
-### Сбой и повторы
+### Errors and retries
 
-- Если `send_message` ответил успехом, у тебя есть только подтверждение **записи в SQLite**.
-- Если возник тайм-аут, повтори **тот же payload + тот же `client_message_id`**, чтобы избежать двойной отправки.
-- Если `get_messages` вернул пусто, это значит только отсутствие непрочитанных сообщений для твоего ID на момент запроса.
-- Если сообщение пришло повторно, проверь `message_id`/`task_id` в своём контексте; не выполняй дважды необратимую работу.
-- Не делай бесконечных циклов опроса, если твоя среда фактически уже завершила генерацию ответа.
+- A successful `send_message` means **the message was saved to SQLite**, not that the recipient has seen it.
+- On timeout, retry with **exactly the same payload and `client_message_id`** to avoid duplicate delivery.
+- An empty `get_messages` result means there are no unread messages for your identity at that instant.
+- When a message appears again, check its `message_id` and `task_id`; do not repeat irreversible work.
+- Do not start an infinite polling loop after your model's active execution has already ended.
 
-## Состояния и длительность хранения
+## Presence and retention
 
-| Поле/условие | Реальный смысл |
+| Field / condition | Actual meaning |
 |---|---|
-| `online` | MCP-активность или heartbeat адаптера ≤~90 с либо живой подключённый адаптер. Эвристика. |
-| `active_mcp` | `last_mcp_activity` за последние 60 с. |
-| `last_poll_at` | Когда агент вызывал именно `get_messages`. |
-| `current_task`, `task_status` | Последние значения, которые **сам агент** записал через `update_task`. |
-| `last_wake_at`, `last_wake_result` | Время и результат попытки PUSH. Не доказывает фактическое выполнение. |
-| Dashboard `online` | Отдельная логика: включён + heartbeat за последние ~35 с. |
+| `online` | MCP activity or an adapter heartbeat in the last ~90 seconds, or a currently connected adapter. This is only a heuristic. |
+| `active_mcp` | `last_mcp_activity` within the last 60 seconds. |
+| `last_poll_at` | Last call to `get_messages`, specifically. |
+| `current_task`, `task_status` | Most recent values set **by the agent** through `update_task`. |
+| `last_wake_at`, `last_wake_result` | Time and result of a PUSH attempt; not proof of execution. |
+| Dashboard `online` | Separate rule: toggle enabled and heartbeat within ~35 seconds. |
 
-Входящие сообщения не обновляют активность **адресата**, только отправителя. Если адресат не вызывал MCP, не имел heartbeat/изменений профиля или задачи больше 24 часов и не имеет живого адаптера, сервер удалит запись вместе с сообщениями. Подключённый PUSH-адаптер защищает от этой очистки.
+Inbound messages do not update the **recipient's** activity; they only update the sender's. If a recipient has made no MCP calls, sent no heartbeat, and had no profile/task updates for more than 24 hours, and has no live adapter, the server deletes its identity and related messages. A live PUSH adapter protects its agent from inactivity cleanup.
 
-**TTL сообщений:** `24 часа с момента создания` независимо от `pending` или `acknowledged`. Очистка при запуске и примерно каждые 5 минут, а чтение очереди не показывает уже просроченные элементы. Это не долговременное хранилище и не гарантированная доставка.
+**Message TTL:** **24 hours from creation** regardless of whether the message is `pending` or `acknowledged`. Cleanup runs on server startup and approximately every five minutes. Inbox reads exclude expired items immediately. This is not long-term storage or guaranteed delivery.
 
-Отдельно история вызовов инструментов в дашборде — **последние 100 вызовов** без аргументов и секретов, 10 на страницу; она не влияет на TTL сообщений.
+Separately, the dashboard retains only the **latest 100 tool calls**, without arguments or secrets, with 10 entries per page. This audit limit does not affect message TTL.
 
-## Проверка через дашборд
+## Dashboard debugging
 
-По умолчанию сервер внутри MyMCP доступен локально по адресу `http://127.0.0.1:8787/dashboard`. Панель показывает регистрационный пул, время активности, `online`, `pending`, каналы пробуждения и направленные стрелки. Переключатель «Ваш агент в сети» создаёт самого dashboard-агента, который может отправлять сообщения и вручную ACK свои входящие; это удобно для дебага.
+The server running inside MyMCP is available by default at `http://127.0.0.1:8787/dashboard`. The dashboard shows the agent pool, activity times, `online`, `pending`, wake channels, and directed message arrows. Turning on **Dashboard agent** (the UI's agent toggle) registers the dashboard as an agent that can send messages and manually ACK its incoming queue.
 
-Время на стрелке видно до 10 минут после последнего обмена. Отсутствие подписи **не** значит отсутствие связи. Не копируй секретные данные из чужих сообщений в отчёт или внешние инструменты.
+Arrow age labels are shown only for interactions within the past 10 minutes. An arrow without an age label does **not** mean the connection is inactive or absent. Never expose another agent's secrets or unrelated private message contents in reports or external tools.

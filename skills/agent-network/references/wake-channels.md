@@ -1,87 +1,87 @@
-# PUSH-каналы: ChatGPT extension, Codex CLI sidecar, MCP-only
+# PUSH wake channels: ChatGPT extension, Codex CLI sidecar, MCP-only agents
 
-Текущая реализация: `tools/agent-network/agent_network/server.py` (`Broker`), `extension/background.js`, `extension/content.js`, `extension/network-state.js` и `agent_network/codex_adapter.py`.
+Implementation references: `tools/agent-network/agent_network/server.py` (`Broker`), `extension/background.js`, `extension/content.js`, `extension/network-state.js`, and `agent_network/codex_adapter.py`.
 
-## Два независимых канала
+## Two independent channels
 
 ```text
 Agent A ── send_message (native MCP) ──▶ Agent Network ── SQLite pending
                                                 │
 Agent B ◀── get_messages (native MCP) ────────────┘
     ▲
-    │     если нет MCP-вызовов ~60 с + pending + idle adapter:
+    │     when MCP has been inactive for ~60s + pending messages + idle adapter:
     │
     └── wake hint ── optional adapter ◀── Agent Network WebSocket
-                     (только счётчик, ID и сигнал; без текста сообщения)
+                     (only message count, agent ID, and wake signal; no bodies)
 ```
 
-Отправка `wake` через WebSocket — **не доставка пользовательского сообщения в содержательном смысле**. Нужен последующий `get_messages` через MCP. Сервер выбирает доступный канал пробуждения, но не знает, как управлять интерфейсом ChatGPT или CLI сам. Если альтернативного канала нет, содержимое остаётся в native MCP inbox до чтения или TTL.
+Sending a WebSocket `wake` is **not the same as delivering the message content**. The agent must subsequently call `get_messages` through MCP. The server selects an available wake channel but does not itself know how to control the ChatGPT UI or a CLI process. With no alternative wake channel, messages remain in the native MCP inbox until retrieval or expiration.
 
-### Решение о пробуждении
+### When the server attempts a wake
 
-Условия серверного диспетчера:
+The dispatcher requires all of the following:
 
-1. Есть `pending` сообщения адресату.
-2. У адресата не было MCP-вызовов около **60 секунд**.
-3. Есть подключённый PUSH-адаптер с `channel.state=idle`.
-4. С последней попытки wake прошло около **90 секунд**.
+1. The intended recipient has `pending` messages.
+2. The recipient has made no MCP calls for about **60 seconds**.
+3. A PUSH adapter is connected and reports `channel.state=idle`.
+4. About **90 seconds** have elapsed since the previous wake attempt.
 
-Сервер сначала сохраняет факт попытки, затем отправляет sidecar `wake_id`, `agent_id` и `pending_count`. Бесконечного спама UI не должно быть; потеря wake/ACK возможна. При `busy`/`draft`/`unknown` PUSH не посылается. Статус пробуждения `submitted`/`queued` **не гарантирует**, что агент приступил к работе.
+The server records the attempt before sending `wake_id`, `agent_id`, and `pending_count` to the sidecar, limiting repeated UI wake prompts. Wake signals and their acknowledgments can still be lost. No PUSH is sent while the adapter reports `busy`, `draft`, or `unknown`. A `submitted` or `queued` wake result **does not guarantee the agent resumed working**.
 
-## ChatGPT: расширение Chrome
+## ChatGPT: Chrome extension
 
-Это **адаптер для ChatGPT-вкладки**, устанавливаемый как unpacked extension из `tools/agent-network/extension`.
+The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-network/extension`.
 
-1. Подключи `agent-network` к ChatGPT через My MCP Tools. Открой нужную существующую беседу `chatgpt.com/.../c/...`.
-2. В popup расширения выбери сервер (локально `http://127.0.0.1:8787`), имя агента, роль/описание и нажми **Старт**.
-3. Расширение регистрирует именно эту вкладку в пуле, сохраняет идентичность по вкладке в `chrome.storage.local`, отправляет bootstrap сообщение в ChatGPT с `agent_id` и токеном. Не регистрируйся ещё раз, если оно уже пришло.
-4. Расширение наблюдает DOM (поле ввода, Stop generating, черновик) и жизненный цикл некоторых сетевых запросов ChatGPT. Приложенческий WebSocket heartbeat раз в ~20 секунд сообщает `idle`, `busy`, `draft` или `unknown`.
-5. Если сервер видит подходящие условия для PUSH, расширение **повторно** проверяет, что чат idle, нет черновика и URL беседы не сменился, и через UI отправляет обычную фразу «Проверь входящие Agent Network через MCP». Модель возобновляет ответ и сама вызывает `get_messages`.
+1. Connect `agent-network` to ChatGPT through My MCP Tools. Open the intended existing conversation at `chatgpt.com/.../c/...`.
+2. In the extension popup, choose the server (local default `http://127.0.0.1:8787`), set the agent name, role, and description, then click **Start** (the button label may be localized).
+3. The extension registers that specific tab, stores its per-tab identity in `chrome.storage.local`, and sends a bootstrap message to ChatGPT with `agent_id` and `token`. Do not register again if the bootstrap already supplied the credentials.
+4. The extension monitors the DOM (composer, Stop generating, draft text) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
+5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, and the conversation URL has not changed. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
 
-Содержимое входящих сообщений расширение не передаёт. Не путай отправку wake-текста с `send_message`. Поскольку UI ChatGPT меняется, это best-effort механизм, а не SLA. При закрытой вкладке, отключённом расширении, сменившемся DOM или лимитах модели пробуждение может не произойти.
+The extension never forwards incoming message bodies. Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
 
-**Безопасность MVP:** токен присутствует в bootstrap-сообщении чата. Это рабочее решение для доверенной локальной среды, не для production с изоляцией секретов.
+**MVP security limitation:** the agent token appears in the chat's bootstrap message. This is intended for a trusted local environment, not production-grade credential isolation.
 
-## Codex CLI: дополнительная локальная утилита
+## Codex CLI: separate local sidecar
 
-**Сам Codex подключён к native MCP напрямую**. PUSH обеспечивает отдельная CLI-программа, запущенная **в том же окружении**, где доступен нужный Codex thread и команда `codex`. Этот процесс не должен подменять MCP-сервер.
+**Codex itself connects to native MCP directly.** A separate CLI process provides PUSH when run **in the same environment** as the relevant Codex thread and the `codex` executable. This process does not replace or proxy the MCP server.
 
-После регистрации агента в native MCP и получения идентичности запусти в `tools/agent-network`:
+After registering the agent through native MCP and obtaining its identity, run the sidecar from `tools/agent-network`:
 
 ```bash
-# Укажи секрет только в защищённой среде; не записывай токен в Git.
+# Provide the secret in a trusted environment; never commit it to Git.
 export AGENT_NETWORK_TOKEN='<my-secret-token>'
 .venv/bin/python -m agent_network.codex_adapter \
   --agent-id '<registered-agent-uuid>' \
   --thread '<codex-thread-id>'
 ```
 
-Можно передать токен через `--token-file /path/to/secret` (права файла — `chmod 600`). Дополнительные опции: `--server ws://127.0.0.1:8787/api/v1/channels/ws`, `--codex` и `--no-resume`. В текущем MVP sidecar допускает **только loopback WebSocket**; удалённый хост требует отдельного локального транспорта/адаптера.
+Alternatively, provide `--token-file /path/to/secret` and restrict its permissions with `chmod 600`. Other options include `--server ws://127.0.0.1:8787/api/v1/channels/ws`, `--codex`, and `--no-resume`. The current MVP sidecar accepts **loopback WebSocket endpoints only**; a remote host requires a separate secured local transport or adapter.
 
-При wake адаптер вызывает:
+On a wake, the adapter runs:
 
 ```text
 codex queue --thread <thread> --message "<wake hint>" --resume
 ```
 
-Hint просит Codex вызвать `get_messages` через MCP, а не содержит тело задачи. Код возврата CLI или `queued` в журнале — не подтверждение, что Codex действительно ответил. Нужен вызов MCP и, по возможности, `ack_message`/ответ.
+The hint instructs Codex to call `get_messages` through MCP; it does not include the task body. A successful CLI exit or a `queued` result does not establish that Codex actually resumed. Verify the subsequent MCP call and, where possible, an `ack_message` or reply.
 
-**Текущее ограничение:** Codex-sidecar при подключении объявляет `idle` и сам не отслеживает реальную занятость Codex-сессии приложенческими heartbeat. Сервер проверяет последний MCP-вызов, но это только эвристика. Не обещай детектирование сна с точностью до секунды.
+**Current limitation:** the Codex sidecar announces `idle` upon connection but does not measure the real Codex session's busy state with application-level heartbeats. The server additionally checks recent MCP activity, but that is only a heuristic. Do not claim second-accurate idle detection.
 
-Не запускай два независимых wake-sidecar на один Codex thread. Не создавай демоны или системный автозапуск по собственной инициативе: дополнительная программа запускается при необходимости с разрешения пользователя.
+Do not start multiple independent sidecars for the same Codex thread. Do not set up daemons or system autostart on your own: launch the extra program when needed and with the user's permission.
 
-## Другие агенты и удалённые машины
+## Other agents and remote machines
 
-Агент на другом сервере может подключаться **только native MCP** и использовать все 7 инструментов для списка агентов, обмена сообщениями и обновления задач. Дополнительного sidecar **не требуется**, чтобы работать в активной фазе.
+An agent on another server may connect through **native MCP only** and use all seven tools for discovering agents, exchanging messages, and updating tasks. It does **not** need a sidecar to operate while its own execution is active.
 
-**Но** без специального PUSH-адаптера невозможно гарантировать автоматическое пробуждение после завершения исполнения. Сообщение остаётся в очереди максимум 24 часа; когда среда снова вызовет MCP, она сможет его получить, если TTL ещё не истёк.
+**However**, without a compatible PUSH adapter, automatic wake after the agent stops executing cannot be guaranteed. A queued message remains available for at most 24 hours; the environment can fetch it if it calls MCP again before TTL expiry.
 
-В проекте пока есть готовые адаптеры только для **ChatGPT Chrome extension** и **Codex CLI**. Наличие Claude Code или другой CLI не подразумевает, что для неё уже готов PUSH.
+The project currently provides ready-made wake adapters only for the **ChatGPT Chrome extension** and **Codex CLI**. Having Claude Code or another CLI installed does not imply that a corresponding PUSH adapter already exists.
 
-## Диагностика
+## Diagnostics
 
-- `list_agents`: посмотри `online`, `active_mcp`, `last_poll_at`, `task_status`, `last_wake_at` и `last_wake_result`.
-- Дашборд `http://127.0.0.1:8787/dashboard`: открой «PUSH-адаптеры», проверь связь, очередь, последнее сообщение и статус адаптера.
-- Для end-to-end теста включи dashboard-агента, отправь короткое тестовое сообщение нужному агенту, дождись его **самостоятельного** `get_messages`/ACK/ответа. Не считай факт `wake_result=queued` достаточным.
-- Если агент исчез из списка после 24 часов без активности, его имя могло освободиться. Старая идентичность больше не подходит; зарегистрируй новую и обнови sidecar/привязку вкладки.
-- Если имя есть, а сообщений нет — проверь адресата, ACK, TTL 24 часа и отложенные вызовы MCP. Отсутствие ответа не равно ошибке `send_message`.
+- Use `list_agents` to check `online`, `active_mcp`, `last_poll_at`, `task_status`, `last_wake_at`, and `last_wake_result`.
+- Open `http://127.0.0.1:8787/dashboard` and inspect **PUSH adapters** for connection state, the pending queue, last message, and adapter status.
+- For an end-to-end test, enable the dashboard agent, send a short test message to the intended recipient, and check for the recipient's **own** `get_messages`, ACK, or reply. `wake_result=queued` alone is insufficient.
+- If an agent disappears after 24 hours of inactivity, its name may have been released. Register a new identity and update its sidecar or browser-tab binding.
+- If an agent exists but no messages are visible, verify recipient identity, ACK status, the 24-hour TTL, and whether the agent is still polling MCP. Lack of a reply does not necessarily mean `send_message` failed.

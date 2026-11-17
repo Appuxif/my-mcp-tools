@@ -34,7 +34,7 @@ Use accessible semantic targets when possible. Blender's 3D viewport, games and 
   "actions": [
     {"type": "click", "x": 0.48, "y": 0.82, "normalized": true},
     {"type": "wait", "ms": 250},
-    {"type": "type_text", "text": "Привет! Hello world!"},
+    {"type": "type_text", "text": "Hello! 👋 Unicode works!"},
     {"type": "wait", "ms": 200},
     {"type": "hotkey", "combo": "Return"}
   ],
