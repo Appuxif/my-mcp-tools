@@ -65,7 +65,7 @@
         <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>
       </article>
       <article class="panel detail-panel">
-        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><span class="fine-badge">LIVE</span></div>
+        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Для удаления включите агента дашборда">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
         <div id="inspector" class="inspector-body"><div class="inspector-placeholder"><span>⌁</span><strong>Выберите агента</strong><p>Нажмите на узел сети, чтобы изучить его состояние и активность.</p></div></div>
       </article>
     </section>
@@ -161,6 +161,7 @@
 
     <footer class="page-footer"><div><span class="footer-mark">◈</span> Agent Network <span class="muted">· native MCP, optional wake sidecars</span></div><span>Локальная панель · не публикуйте её без авторизации</span></footer>
   </main>
+  <script src="/dashboard-assets/graph-utils.js" defer></script>
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
 </body>

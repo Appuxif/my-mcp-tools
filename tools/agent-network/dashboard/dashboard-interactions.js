@@ -42,7 +42,11 @@
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw Error(data.detail || 'Server error: ' + res.status);
+    if (!res.ok) {
+      const error = new Error(data.detail || 'Server error: ' + res.status);
+      error.status = res.status;
+      throw error;
+    }
     return data;
   }
   const saveIdentity = () => {
@@ -55,6 +59,10 @@
   };
   function showEnabled() {
     const enabled = active();
+    $('delete-agent').disabled = !enabled;
+    $('delete-agent').title = enabled
+      ? 'Удалить выбранного агента и его сообщения'
+      : 'Для удаления включите агента дашборда';
     $('dashboard-toggle').checked = enabled;
     $('dashboard-name').disabled = !!identity?.agent_id;
     if (identity?.name) $('dashboard-name').value = identity.name;
@@ -84,10 +92,23 @@
       if (wanted) {
         const name = (identity?.name || $('dashboard-name').value).trim();
         if (!name) throw Error('Укажите имя агента.');
-        const result = await api('/api/v1/dashboard-agent/enable', {
-          method:'POST',
-          body: {name, agent_id:identity?.agent_id || '', token:identity?.token || ''},
-        });
+        let result;
+        try {
+          result = await api('/api/v1/dashboard-agent/enable', {
+            method:'POST',
+            body: {name, agent_id:identity?.agent_id || '', token:identity?.token || ''},
+          });
+        } catch (error) {
+          if (identity?.agent_id && error.status === 409 &&
+              String(error.message).includes('Unknown agent identity')) {
+            // Previous identity expired after 24 hours: create a fresh one.
+            result = await api('/api/v1/dashboard-agent/enable', {
+              method:'POST', body:{name},
+            });
+          } else {
+            throw error;
+          }
+        }
         identity = {
           name:result.agent.name,
           agent_id:result.agent.agent_id,
@@ -171,6 +192,16 @@
         });
       }
     } catch(e) {
+      if (e.status === 403) {
+        // Stale tab identity was deleted/expired on the server.
+        const previousName = identity?.name;
+        identity = null;
+        saveIdentity();
+        if (previousName) $('dashboard-name').value = previousName;
+        showEnabled();
+        status('Регистрация агента устарела. Включите его повторно.', true);
+        return;
+      }
       status('Входящие: ' + String(e.message||e),true);
     }
   }
@@ -283,6 +314,45 @@
       });
   }
 
+  async function deleteSelectedAgent() {
+    if (!active()) {
+      status('Включите агента дашборда для удаления других агентов', true);
+      return;
+    }
+    const button = $('delete-agent');
+    const targetId = button.dataset.agentId;
+    const targetName = button.dataset.agentName;
+    if (!targetId || !targetName || button.disabled) return;
+    const accepted = confirm(
+      'Безвозвратно удалить агента «' + targetName + '»?\\n\\n' +
+      'Будут удалены все его сообщения (входящие и исходящие) и PUSH-адаптеры. ' +
+      'Имя освободится; прежний токен перестанет работать.'
+    );
+    if (!accepted) return;
+    button.disabled = true;
+    try {
+      const result = await api(
+        '/api/v1/dashboard/agents/' + encodeURIComponent(targetId),
+        {method:'DELETE'}, true
+      );
+      if (result.deleted_self) {
+        identity = null;
+        saveIdentity();
+        $('dashboard-name').value = '';
+        showEnabled();
+      }
+      status('Удалён агент «' + result.name + '», связанных сообщений: ' +
+             result.deleted_messages);
+      document.dispatchEvent(new CustomEvent('agent-network:refresh'));
+      void refreshHistories();
+    } catch (error) {
+      status('Удаление: ' + String(error.message || error), true);
+    } finally {
+      button.disabled = !active();
+    }
+  }
+
+  $('delete-agent').addEventListener('click', () => void deleteSelectedAgent());
   $('dashboard-toggle').addEventListener('change', () => void onToggle());
   $('dashboard-compose').addEventListener('submit', submitMessage);
   $('dashboard-message').addEventListener('input', () => {sendAttemptKey=null;});

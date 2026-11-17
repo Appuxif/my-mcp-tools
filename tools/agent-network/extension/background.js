@@ -69,7 +69,11 @@ async function fetchJSON(server, path, payload) {
     signal: AbortSignal.timeout(8000),
   });
   const result = await r.json();
-  if (!r.ok) throw Error(result.detail || ('Server HTTP ' + r.status));
+  if (!r.ok) {
+    const error = new Error(result.detail || ('Server HTTP ' + r.status));
+    error.status = r.status;
+    throw error;
+  }
   return result;
 }
 async function probe(tabId, record) {
@@ -140,7 +144,20 @@ async function connect(tabId, record) {
     let msg;
     try { msg = JSON.parse(e.data); } catch { return; }
     if (msg.type === 'wake') void wake(tabId, record, ws, msg);
-    else if (msg.type === 'error') console.warn('Agent Network:', msg.error);
+    else if (msg.type === 'error') {
+      console.warn('Agent Network:', msg.error);
+      if (String(msg.error).includes('Unknown agent_id')) {
+        // The agent expired or was manually deleted. Require explicit Start
+        // to register a fresh identity and send a new bootstrap prompt.
+        void storage().then(async entries => {
+          const latest = entries[tabId];
+          if (latest?.agentId !== record.agentId) return;
+          latest.active = false;
+          latest.bootstrapDone = false;
+          await save(entries);
+        });
+      }
+    }
   };
   ws.onclose = () => {
     if (connection.interval) clearInterval(connection.interval);
@@ -170,12 +187,22 @@ async function startAgent(tabId, profile) {
     throw Error('Agent name is immutable. Stop and create a new agent in a new chat.');
   let created = false;
   if (record) {
-    await fetchJSON(server, '/api/v1/agents/profile', {
-      agent_id: record.agentId, token: record.token,
-      role: profile.role, purpose: profile.purpose, description: profile.description,
-    });
-    record = { ...record, ...profile, active: true };
-  } else {
+    try {
+      await fetchJSON(server, '/api/v1/agents/profile', {
+        agent_id: record.agentId, token: record.token,
+        role: profile.role, purpose: profile.purpose, description: profile.description,
+      });
+      record = { ...record, ...profile, active: true };
+    } catch (error) {
+      if (error.status === 400 && String(error.message).includes('Unknown agent_id')) {
+        disconnect(tabId);
+        record = null; // expired/deleted identity; fresh registration below
+      } else {
+        throw error;
+      }
+    }
+  }
+  if (!record) {
     const result = await fetchJSON(server, '/api/v1/agents/register', {
       ...profile, kind: 'chatgpt',
     });

@@ -81,7 +81,20 @@ class Broker:
     def run_maintenance(self):
         self.store.prune_messages()
         self.store.prune_channels()
+        self.store.prune_agents(
+            exclude_ids={owner for owner, _, _ in self.connections.values()}
+        )
         self.last_maintenance = time.monotonic()
+
+    async def disconnect_agent(self, agent_id: str) -> None:
+        """Invalidate an agent's active wake adapters after identity deletion."""
+        for channel_id, (owner, _, ws) in list(self.connections.items()):
+            if owner == agent_id:
+                self.connections.pop(channel_id, None)
+                try:
+                    await ws.close(code=1008, reason="Agent was deleted")
+                except Exception:
+                    pass
 
     async def stop(self):
         if self.worker is not None:
@@ -344,6 +357,22 @@ def create_app(config: Config | None = None) -> FastAPI:
         except (PermissionError, ValueError) as exc:
             raise HTTPException(403, str(exc)) from exc
         return agent_id, token
+
+    @app.delete("/api/v1/dashboard/agents/{target_agent_id}")
+    async def dashboard_delete_agent(target_agent_id: str, req: Request) -> dict:
+        """Delete a named agent and its messages; dashboard operator only.
+
+        A human must explicitly confirm deletion in the dashboard UI.
+        Invalidates the agent's token and frees its name for new registrations.
+        """
+        operator_id, _ = dashboard_credentials(req)
+        try:
+            result = store.delete_agent(target_agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        await broker.disconnect_agent(target_agent_id)
+        result["deleted_self"] = target_agent_id == operator_id
+        return result
 
     @app.post("/api/v1/dashboard-agent/enable")
     def dashboard_enable(body: DashboardEnable, req: Request) -> JSONResponse:

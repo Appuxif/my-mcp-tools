@@ -133,6 +133,63 @@ class Store:
             ).rowcount
             return {"expired_messages": removed}
 
+    def delete_agent(self, agent_id: str) -> dict:
+        """Delete one identity and its dependent queue/channel records atomically.
+
+        Existing tokens become invalid immediately; the freed name can be reused
+        by a fresh registration. Callers authorize this operation separately.
+        """
+        with self.lock, self.db:
+            agent = self._agent(agent_id)
+            messages = self.db.execute(
+                "DELETE FROM messages WHERE sender_id=? OR recipient_id=?",
+                (agent_id, agent_id)
+            ).rowcount
+            channels = self.db.execute(
+                "DELETE FROM channels WHERE agent_id=?", (agent_id,)
+            ).rowcount
+            # Keep aggregate tool telemetry but unlink it from deleted identities.
+            self.db.execute("UPDATE tool_calls SET agent_id=NULL WHERE agent_id=?",
+                            (agent_id,))
+            self.db.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
+            return {"agent_id": agent_id, "name": agent["name"],
+                    "deleted_messages": messages, "deleted_channels": channels}
+
+    def prune_agents(self, *, at: float | None = None,
+                     exclude_ids: set[str] | None = None) -> list[dict]:
+        """Expire identities with no activity for >24h, freeing their names.
+
+        Live sidecars supplied by Broker are excluded even if no ping has been
+        observed recently. A recent inbound message does not reset recipient
+        activity, so an abandoned identity can still expire.
+        """
+        cutoff = (now() if at is None else at) - MESSAGE_TTL_SECONDS
+        excluded = exclude_ids or set()
+        deleted = []
+        with self.lock, self.db:
+            rows = self.db.execute(
+                """SELECT agent_id FROM agents
+                   WHERE max(created_at, updated_at,
+                             coalesce(last_mcp_activity,0),
+                             coalesce(last_channel_activity,0),
+                             coalesce(last_dashboard_seen,0)) < ?
+                   ORDER BY agent_id""",
+                (cutoff,)
+            ).fetchall()
+            for row in rows:
+                agent_id = row["agent_id"]
+                if agent_id in excluded:
+                    continue
+                # Never erase a currently connected adapter session.
+                attached = self.db.execute(
+                    "SELECT 1 FROM channels WHERE agent_id=? AND connected=1",
+                    (agent_id,)
+                ).fetchone()
+                if attached:
+                    continue
+                deleted.append(self.delete_agent(agent_id))
+        return deleted
+
     def prune_channels(self, *, at: float | None = None) -> int:
         """Discard old disconnected wake-channel sessions (not registered agents)."""
         cutoff = (now() if at is None else at) - MESSAGE_TTL_SECONDS

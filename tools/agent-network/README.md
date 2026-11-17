@@ -79,8 +79,11 @@ It refreshes every 3 seconds and shows server status, uptime, total/online
 agents, pending messages, the count sent in 24 hours, and attached adapters.
 
 The interactive SVG graph displays agents as nodes and message relationships as
-directed animated arrows, highlighting queued messages. Select an agent to
-view its task, last MCP activity, inbox size, status and wake adapters.
+directed animated arrows, highlighting queued messages. Bidirectional traffic
+uses separate curved lanes; self-messages use external loops. A label shows
+N seconds ago for recent messages, N minutes for messages up to 10 minutes old,
+and no time beyond 10 minutes. Select an agent to view its task,
+last MCP activity, inbox size, status and wake adapters.
 Tables below show the agent pool, adapters and message events. Neither message
 bodies nor authentication tokens appear in the dashboard.
 
@@ -108,6 +111,27 @@ sent only in authenticated same-origin requests. This is suitable for a trusted
 local debugging dashboard, **not** an internet-facing multi-user admin app.
 Access to localStorage and HTTP endpoints should be protected before remote
 exposure.
+
+### Agent name expiry and manual deletion
+
+An agent retains its name until it has gone more than **24 hours without
+activity**, as measured by its latest registration, MCP call, profile/task
+update, PUSH heartbeat, or dashboard heartbeat. Active PUSH WebSocket sessions
+prevent automatic expiry. At startup and every five minutes, the maintenance
+worker deletes abandoned agents and releases their names. Their old token
+and agent ID are no longer valid; a new registration with the same name gets
+a new identity. Incoming messages do not count as recipient activity.
+
+To remove an agent manually: activate **Ваш агент в сети**, select an agent
+in the graph or agent table, then press **Удалить агента** in the inspector.
+An explicit confirmation warns that the identity, its incoming/outgoing
+messages and PUSH adapter sessions will be deleted. This action requires a
+valid dashboard-agent credential and closes the deleted agent's live adapter
+connection. It is irreversible.
+
+The Chrome extension and dashboard can re-register an expired agent under
+the same name when it becomes available again; the ChatGPT conversation gets
+a fresh identity prompt and secret.
 
 ### History and bounded persistence
 

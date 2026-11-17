@@ -75,8 +75,10 @@
       const width = Math.max(175, Math.min(265, longest * 7.6 + 48));
       const height = 62 + (lines.length - 1) * 17;
       positions.set(agent.agent_id, {
-        x: agents.length === 1 ? W / 2 : W / 2 + Math.cos(angle) * radiusX,
-        y: agents.length === 1 ? H / 2 : H / 2 + Math.sin(angle) * radiusY,
+        x: agents.length === 1 ? W / 2 :
+           agents.length === 2 ? (index === 0 ? 245 : 655) :
+           W / 2 + Math.cos(angle) * radiusX,
+        y: agents.length <= 2 ? H / 2 : H / 2 + Math.sin(angle) * radiusY,
         lines, width, height
       });
     });
@@ -89,30 +91,35 @@
     pendingArrow.append(newSvg('path', {d:'M0 0 L7 3.5 L0 7 z', fill:'#e9b878'}));
     defs.append(arrow, pendingArrow);
     svg.append(defs);
+    const activePairs = new Set(data.edges.map(e => e.source + ':' + e.target));
     data.edges.forEach(edge => {
       const a = positions.get(edge.source), b = positions.get(edge.target);
       if (!a || !b) return;
-      const dx = b.x - a.x, dy = b.y - a.y;
-      if (Math.abs(dx) + Math.abs(dy) < 2) return;
-      const len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
-      const borderDistance = node => Math.min(
-        (node.width / 2 + 9) / Math.max(Math.abs(ux), .001),
-        (node.height / 2 + 7) / Math.max(Math.abs(uy), .001)
-      );
-      const start = borderDistance(a), end = borderDistance(b);
-      if (start + end >= len) return;
-      const sx = a.x + ux * start, sy = a.y + uy * start;
-      const tx = b.x - ux * end, ty = b.y - uy * end;
-      const bend = ((String(edge.source).charCodeAt(0) % 2) ? 1 : -1) * Math.min(36, len / 8);
-      const mx = (sx + tx) / 2 - uy * bend, my = (sy + ty) / 2 + ux * bend;
+      const reciprocal = activePairs.has(edge.target + ':' + edge.source);
+      const geometry = AgentNetworkGraph.edgeGeometry(a, b, reciprocal);
+      if (!geometry) return;
       const isPending = edge.pending_count > 0;
       svg.append(newSvg('path', {
-        d:`M ${sx} ${sy} Q ${mx} ${my} ${tx} ${ty}`,
+        d:geometry.path,
         class:'edge' + (isPending ? ' has-pending' : ''),
         'marker-end':isPending ? 'url(#pending-arrow)' : 'url(#flow-arrow)'
       }));
       const count = Math.max(edge.recent_count || 0, edge.pending_count || 0);
-      svg.append(newSvg('text', {x:mx, y:my - 8, class:'edge-count', 'text-anchor':'middle'}, '×' + count));
+      const lastSeen = AgentNetworkGraph.edgeAge(edge.last_message_at);
+      const label = '×' + count + (lastSeen ? ' · ' + lastSeen : '');
+      const group = newSvg('g', {class:'edge-info'});
+      const text = newSvg('text', {
+        x:geometry.labelX, y:geometry.labelY + 4,
+        class:'edge-info-label', 'text-anchor':'middle'
+      }, label);
+      group.append(text);
+      svg.append(group);
+      const width = Math.max(32, text.getComputedTextLength() + 16);
+      const rect = newSvg('rect', {
+        x:geometry.labelX - width / 2, y:geometry.labelY - 10,
+        width, height:21, rx:6, class:'edge-info-bg'
+      });
+      group.insertBefore(rect, text);
     });
     agents.forEach(agent => {
       const p = positions.get(agent.agent_id);
@@ -163,7 +170,12 @@
     const el = $('inspector');
     if (!selectedId && data.agents.length === 1) selectedId = data.agents[0].agent_id;
     const agent = data.agents.find(a => a.agent_id === selectedId);
+    const deleteButton = $('delete-agent');
+    deleteButton.hidden = !agent;
+    deleteButton.dataset.agentId = agent?.agent_id || '';
+    deleteButton.dataset.agentName = agent?.name || '';
     if (!agent) {
+      selectedId = null;
       el.replaceChildren();
       const empty = add(el, 'div', 'inspector-placeholder');
       add(empty, 'span', '', '⌁');
@@ -305,6 +317,7 @@
   function clock() { $('clock').textContent = new Date().toLocaleTimeString('ru-RU'); }
   clock();
   setInterval(clock, 1000);
+  document.addEventListener('agent-network:refresh', () => void poll());
   void poll();
   setInterval(() => void poll(), 3000);
 })();
