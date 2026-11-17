@@ -73,7 +73,7 @@ function fillExisting() {
       ' · Профиль сохранится без изменений.';
   } else {
     for(const field of ['role','purpose','description']) $(field).disabled=false;
-    $('agent-source').textContent='Новое имя создаст отдельного агента. Имя из списка перенесёт существующего.';
+    $('agent-source').textContent='Новое имя создаст агента после авторизации admin-token. Имя из списка перенесёт существующего.';
   }
 }
 function updateOptions(items) {
@@ -98,6 +98,10 @@ async function refresh() {
     const s = await request('network:status');
     $('server').value = s.server;
     $('show-hud').disabled = !s.entry;
+    $('repeat-bootstrap').disabled = !s.entry;
+    $('agent-id-row').hidden = !s.entry;
+    $('agent-token-row').hidden = !s.entry;
+    $('agent-id').value = s.entry?.agentId || '';
     ownAgent=s.entry||null;
     const list=await request('network:available-agents');
     updateOptions(list.items);
@@ -271,6 +275,44 @@ document.addEventListener('DOMContentLoaded', async () => {
       await refresh();
     } catch (e) { show(String(e.message || e)); }
     finally { $('start').disabled = false; }
+  });
+  $('copy-agent-id').addEventListener('click', async () => {
+    if(!ownAgent?.agentId)return;
+    try {
+      await navigator.clipboard.writeText(ownAgent.agentId);
+      show('Agent ID скопирован.');
+    } catch(error) {
+      $('agent-id').focus();
+      $('agent-id').select();
+      show('Выделен Agent ID. Скопируйте его вручную.');
+    }
+  });
+  $('agent-token-apply').addEventListener('click', async () => {
+    if(!ownAgent?.agentId)return;
+    const token=$('agent-token-new').value.trim();
+    if(!token) {show('Вставьте новый токен.');return;}
+    $('agent-token-apply').disabled=true;
+    try {
+      await request('network:update-token',{token});
+      $('agent-token-new').value='';
+      show('Токен расширения обновлён. Отправьте агенту новые credentials или нажмите «Напомнить агенту контекст».');
+    } catch(error) {
+      show('Ошибка обновления токена: '+String(error.message||error));
+    } finally {
+      $('agent-token-apply').disabled=false;
+    }
+  });
+  $('repeat-bootstrap').addEventListener('click', async () => {
+    if(!ownAgent?.agentId)return;
+    $('repeat-bootstrap').disabled=true;
+    try {
+      await request('network:repeat-bootstrap');
+      show('Стартовое сообщение с данными агента повторно отправлено в чат.');
+    } catch(error) {
+      show('Не удалось отправить инструкции: '+String(error.message||error));
+    } finally {
+      $('repeat-bootstrap').disabled=false;
+    }
   });
   $('stop').addEventListener('click', async () => {
     try { await request('network:stop'); await refresh(); }

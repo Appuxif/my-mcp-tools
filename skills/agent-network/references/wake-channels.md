@@ -33,7 +33,7 @@ The server records the attempt before sending `wake_id`, `agent_id`, and `pendin
 The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-network/extension`.
 
 1. Connect `agent-network` to ChatGPT through My MCP Tools. Open the intended existing conversation at `chatgpt.com/.../c/...`.
-2. In the extension popup, choose the server (local default `http://127.0.0.1:8787`), set the agent name, role, and description, then click **Start** (the button label may be localized).
+2. In the extension popup, choose the server (local default `http://127.0.0.1:8787`). For **new agent creation**, first enter the local server's private `admin-token` under **Команды · Управление администратором**, click **Авторизовать**, then set name/role/description and click **Start**. Existing bound agents reconnect with their own token without a new admin grant.
 3. The extension registers a **conversation ID**, not a tab ID. For example,
    `chatgpt.com/c/<id>` and `chatgpt.com/g/<project>/c/<id>` refer to the same
    agent if their final conversation IDs match. Credentials and profile data
@@ -121,7 +121,7 @@ Do not start multiple independent sidecars for the same Codex thread. Do not set
 
 ## Other agents and remote machines
 
-An agent on another server may connect through **native MCP only** and use all nine tools for discovering agents, exchanging messages, and updating tasks. It does **not** need a sidecar to operate while its own execution is active.
+An already provisioned agent on another server may connect through **native MCP only** and use all eight tools for discovering agents, exchanging messages, and updating tasks. It does **not** need a sidecar to operate while its own execution is active.
 
 **However**, without a compatible PUSH adapter, automatic wake after the agent stops executing cannot be guaranteed. A queued message remains available for at most 24 hours; the environment can fetch it if it calls MCP again before TTL expiry.
 

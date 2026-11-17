@@ -135,7 +135,7 @@
 
     <section class="bottom-layout">
       <article class="panel">
-        <div class="panel-heading"><div><div class="section-overline">AGENT POOL</div><h3>Пул агентов</h3></div><span class="counter" id="agents-count">0</span></div>
+        <div class="panel-heading"><div><div class="section-overline">AGENT POOL</div><h3>Пул агентов</h3></div><div class="registry-pool-actions"><button type="button" id="agent-create-open" class="action-button">+ Создать агента</button><span class="counter" id="agents-count">0</span></div></div>
         <div class="table-scroll"><table><thead><tr><th>АГЕНТ</th><th>СТАТУС</th><th>ЗАДАЧА</th><th>ПОСЛЕДНЯЯ MCP-АКТИВНОСТЬ</th><th>ОЧЕРЕДЬ</th></tr></thead><tbody id="agents-body"><tr><td colspan="5" class="table-empty">Нет данных</td></tr></tbody></table></div>
       </article>
       <article class="panel">
@@ -181,6 +181,73 @@
 
     <footer class="page-footer"><div><span class="footer-mark">◈</span> Agent Network <span class="muted">· native MCP, optional wake sidecars</span></div><span>Локальная панель · не публикуйте её без авторизации</span></footer>
   </main>
+
+  <div id="registry-overlay" class="registry-overlay" hidden>
+    <div id="registry-backdrop" class="registry-backdrop" aria-hidden="true"></div>
+    <section id="registry-dialog" class="registry-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="registry-title" tabindex="-1">
+      <header class="registry-header">
+        <div>
+          <div class="section-overline">AGENT PROVISIONING · ADMIN</div>
+          <h3 id="registry-title">Создать агента</h3>
+          <p class="registry-hint">Только администратор может создавать идентичности. Выберите команды до регистрации.</p>
+        </div>
+        <button id="registry-close" class="chat-close" type="button" aria-label="Закрыть" title="Закрыть">×</button>
+      </header>
+      <form id="registry-form" autocomplete="off" class="registry-form">
+        <div class="registry-fields">
+          <label for="registry-name">Имя агента</label>
+          <input id="registry-name" class="field" name="name" maxlength="64" required spellcheck="false"
+            placeholder="Codex-Developer" autocomplete="off">
+          <label for="registry-role">Роль</label>
+          <input id="registry-role" class="field" name="role" maxlength="120" required
+            placeholder="Software Developer" autocomplete="off">
+          <label for="registry-kind">Клиент</label>
+          <select id="registry-kind" name="kind" class="field">
+            <option value="codex">Codex CLI</option>
+            <option value="chatgpt">ChatGPT</option>
+            <option value="claude">Claude</option>
+            <option value="other">Другой</option>
+          </select>
+          <label for="registry-purpose">Назначение</label>
+          <textarea id="registry-purpose" class="field" name="purpose" maxlength="1000"
+            placeholder="Задачи и обязанности агента"></textarea>
+          <label for="registry-description">Описание</label>
+          <textarea id="registry-description" class="field" name="description" maxlength="2000"
+            placeholder="Возможности, специализация"></textarea>
+          <label for="registry-team-name">Команды (1–12)</label>
+          <div class="registry-team-selection">
+            <div id="registry-team-chips" class="registry-team-chips"></div>
+            <div class="registry-team-entry">
+              <input id="registry-team-name" class="field" maxlength="64" list="registry-known-teams"
+                placeholder="Команда" autocomplete="off">
+              <datalist id="registry-known-teams"></datalist>
+              <button id="registry-team-add" class="chat-refresh" type="button">Добавить</button>
+            </div>
+          </div>
+        </div>
+        <p id="registry-form-status" class="registry-hint" role="status">Для существующего агента токен можно перевыпустить в инспекторе.</p>
+        <button id="registry-submit" class="action-button" type="submit">Создать агента</button>
+      </form>
+      <div id="registry-result" class="registry-result" hidden>
+        <div class="section-overline">CREATED · SAVE THE CREDENTIALS</div>
+        <strong>Агент создан. Сохраните данные сейчас.</strong>
+        <p class="registry-warning">Токен доступен при создании. Позже можно перевыпустить его в инспекторе агента; старый токен при этом немедленно перестанет работать.</p>
+        <label for="registry-id-result">Agent ID</label>
+        <input id="registry-id-result" class="field registry-credential" type="text" readonly autocomplete="off">
+        <label for="registry-token-result">Token</label>
+        <input id="registry-token-result" class="field registry-credential" type="text" readonly autocomplete="off">
+        <p id="registry-teams-result" class="registry-hint"></p>
+        <div class="registry-result-actions">
+          <button type="button" id="registry-copy-id" class="chat-refresh">Копировать ID</button>
+          <button type="button" id="registry-copy-token" class="chat-refresh">Копировать токен</button>
+          <button type="button" id="registry-copy-env" class="chat-refresh">Копировать .agent.env</button>
+          <button type="button" id="registry-download-env" class="action-button">Скачать .agent.env</button>
+        </div>
+        <p id="registry-result-status" class="registry-hint" role="status"></p>
+      </div>
+    </section>
+  </div>
 
   <div id="chat-overlay" class="chat-overlay" hidden>
     <div id="chat-backdrop" class="chat-backdrop" aria-hidden="true"></div>
@@ -251,6 +318,7 @@
 
   <script src="/dashboard-assets/graph-utils.js" defer></script>
   <script src="/dashboard-assets/dashboard.js" defer></script>
+  <script src="/dashboard-assets/dashboard-registry.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
   <script src="/dashboard-assets/dashboard-markdown.js" defer></script>

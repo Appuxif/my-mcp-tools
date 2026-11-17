@@ -66,10 +66,27 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 <label for="name">Имя</label><input id="name" maxlength="64" list="known-agents" autocomplete="off" placeholder="Выбери агента или введи новое имя">
 <datalist id="known-agents"></datalist>
 <small id="agent-source" class="hint">Можно выбрать уже зарегистрированного агента для переноса в этот чат.</small>
+<div id="agent-id-row" hidden>
+  <label for="agent-id">Agent ID</label>
+  <div class="team-actions">
+    <input id="agent-id" type="text" readonly spellcheck="false" autocomplete="off">
+    <button id="copy-agent-id" class="secondary" type="button">Копировать</button>
+  </div>
+</div>
+<div id="agent-token-row" hidden>
+  <label for="agent-token-new">Обновить токен после перевыпуска в Dashboard</label>
+  <div class="team-actions">
+    <input id="agent-token-new" type="password" autocomplete="off" spellcheck="false"
+      placeholder="Вставьте новый токен">
+    <button id="agent-token-apply" class="secondary" type="button">Применить</button>
+  </div>
+</div>
 <label for="role">Роль</label><input id="role" maxlength="120" placeholder="Frontend developer">
 <label for="purpose">Назначение</label><input id="purpose" maxlength="1000" placeholder="Работа над интерфейсом">
 <label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
 <div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button></div>
+<div class="agent-actions"><button class="secondary" id="repeat-bootstrap" disabled
+  title="Повторно отправить агенту его идентичность и инструкции MCP">↻ Напомнить агенту контекст</button></div>
 <div id="migration-confirm" class="transfer-review" hidden role="group" aria-labelledby="migration-title">
   <strong id="migration-title">Перенос существующего агента</strong>
   <p id="migration-description"></p>
@@ -85,7 +102,7 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 
 <section class="section" id="admin-section">
   <div class="section-title">КОМАНДЫ · УПРАВЛЕНИЕ АДМИНИСТРАТОРОМ</div>
-  <small class="hint">Назначение команд доступно только с admin-token сервера. Агент сам не может изменить членство. Токен хранится только в расширении, отдельно для каждого сервера.</small>
+  <small class="hint">Создание нового агента и назначение команд требуют admin-token сервера. Существующий агент продолжит работать со своим токеном. Токен хранится только в расширении, отдельно для каждого сервера.</small>
   <label for="admin-token">Admin token (один раз для сервера)</label>
   <input id="admin-token" type="password" autocomplete="off" spellcheck="false"
          placeholder="Вставь токен из файла admin-token">

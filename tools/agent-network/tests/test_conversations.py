@@ -145,11 +145,11 @@ class ConversationHttpTests(unittest.TestCase):
         self.client = self.context.__enter__()
         self.headers = basic_headers(self.app)
         self.client.headers.update(self.headers)
-        a = self.client.post("/api/v1/agents/register", json={
-            "name": "alpha", "role": "tester", "kind": "other",
+        a = self.client.post("/api/v1/dashboard/agents", json={
+            "name": "alpha", "role": "tester", "kind": "other", "teams": ["default"],
         }).json()
-        b = self.client.post("/api/v1/agents/register", json={
-            "name": "beta", "role": "tester", "kind": "other",
+        b = self.client.post("/api/v1/dashboard/agents", json={
+            "name": "beta", "role": "tester", "kind": "other", "teams": ["default"],
         }).json()
         self.aid, self.bid = a["agent"]["agent_id"], b["agent"]["agent_id"]
         self.app.state.store.send(self.aid, a["token"], "beta", "a private body")

@@ -28,6 +28,7 @@ class DashboardBasicAuthTests(unittest.TestCase):
             "/dashboard", "/dashboard/", "/dashboard-assets/dashboard.js",
             "/dashboard-assets/dashboard-conversations.js",
             "/dashboard-assets/dashboard-context.js",
+            "/dashboard-assets/dashboard-registry.js",
             "/dashboard-assets/styles.css",
             "/dashboard-assets/favicon.ico",
             "/dashboard-assets/favicon-16.png",
@@ -87,12 +88,12 @@ class DashboardBasicAuthTests(unittest.TestCase):
         }).status_code,403)
 
     def test_single_login_enables_all_dashboard_functions(self):
-        agent=self.client.post("/api/v1/agents/register",json={
-            "name":"recipient","role":"worker","kind":"other"
+        agent=self.client.post("/api/v1/dashboard/agents",headers=self.headers,json={
+            "name":"recipient","role":"worker","kind":"other", "teams": ["default"]
         }).json()
         aid=agent["agent"]["agent_id"]
-        peer=self.client.post("/api/v1/agents/register",json={
-            "name":"sender","role":"worker","kind":"other"
+        peer=self.client.post("/api/v1/dashboard/agents",headers=self.headers,json={
+            "name":"sender","role":"worker","kind":"other", "teams": ["default"]
         }).json()
         self.app.state.store.send(
             peer["agent"]["agent_id"],peer["token"],"recipient","private body"
@@ -133,14 +134,14 @@ class DashboardBasicAuthTests(unittest.TestCase):
 
     def test_agent_hud_is_token_scoped_without_admin_login(self):
         c=self.client
-        sender=c.post("/api/v1/agents/register",json={
-            "name":"alice","role":"sender role","kind":"chatgpt"
+        sender=c.post("/api/v1/dashboard/agents",headers=self.headers,json={
+            "name":"alice","role":"sender role","kind":"chatgpt", "teams": ["default"]
         }).json()
-        recipient=c.post("/api/v1/agents/register",json={
-            "name":"bob","role":"private recipient role","kind":"other"
+        recipient=c.post("/api/v1/dashboard/agents",headers=self.headers,json={
+            "name":"bob","role":"private recipient role","kind":"other", "teams": ["default"]
         }).json()
-        unrelated=c.post("/api/v1/agents/register",json={
-            "name":"charlie","role":"sensitive third-party role","kind":"other"
+        unrelated=c.post("/api/v1/dashboard/agents",headers=self.headers,json={
+            "name":"charlie","role":"sensitive third-party role","kind":"other", "teams": ["default"]
         }).json()
         a,b=sender["agent"]["agent_id"],recipient["agent"]["agent_id"]
         c.app.state.store.send(a,sender["token"],"bob","SECRET BODY")

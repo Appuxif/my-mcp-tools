@@ -187,8 +187,8 @@ class AdministrativeAndAuditTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as path:
             app=create_app(Config(database=str(Path(path)/"test.db")))
             with TestClient(app,base_url="http://127.0.0.1:8787") as client:
-                reg=client.post("/api/v1/agents/register",json={
-                    "name":"victim","role":"reviewer","kind":"other"
+                reg=client.post("/api/v1/dashboard/agents",headers=basic_headers(app),json={
+                    "name":"victim","role":"reviewer","kind":"other", "teams": ["default"]
                 }).json()
                 aid=reg["agent"]["agent_id"]
                 res=client.post("/mcp",headers={

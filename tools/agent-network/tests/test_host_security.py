@@ -39,11 +39,18 @@ class TrustedHostsTests(unittest.TestCase):
                                                   headers=hostile):
                         pass
                 self.assertEqual(denied.exception.status_code, 400)
-                # Normal requests from the extension to loopback must still work.
-                ok = client.post("/api/v1/agents/register", headers={
+                # New registrations are forbidden without the administrator token.
+                denied_new = client.post("/api/v1/agents/register", headers={
                     "Host": "127.0.0.1:8787",
                     "Origin": "chrome-extension://example",
                 }, json={"name": "normal", "role": "worker"})
+                self.assertEqual(denied_new.status_code, 403)
+                token = Path(app.state.admin_token_file).read_text().strip()
+                ok = client.post("/api/v1/agents/register", headers={
+                    "Host": "127.0.0.1:8787",
+                    "Origin": "chrome-extension://example",
+                    "X-Agent-Network-Admin-Token": token,
+                }, json={"name": "normal", "role": "worker", "kind":"chatgpt"})
                 self.assertEqual(ok.status_code, 200, ok.text)
 
     def test_explicit_private_proxy_hostname_and_no_wildcard(self):
@@ -53,10 +60,21 @@ class TrustedHostsTests(unittest.TestCase):
             }):
                 app = create_app(Config(database=str(Path(tmp) / "api.db")))
             with TestClient(app, base_url="http://127.0.0.1:8787") as client:
+                # Trusted host is not sufficient to create an identity.
                 created = client.post("/api/v1/agents/register", headers={
                     "Host": "proxy.private.example",
                 }, json={"name": "proxy-worker", "role": "worker"})
-                self.assertEqual(created.status_code, 200, created.text)
+                self.assertEqual(created.status_code, 403, created.text)
+                # A previously provisioned agent can reconnect with its own credentials.
+                provisioned=app.state.store.register(
+                    "proxy-worker", "worker", "chatgpt")
+                reconnected=client.post("/api/v1/agents/register", headers={
+                    "Host": "proxy.private.example",
+                }, json={"name": "proxy-worker", "role": "worker", "kind": "chatgpt",
+                         "agent_id":provisioned["agent"]["agent_id"],
+                         "token":provisioned["token"]})
+                self.assertEqual(reconnected.status_code, 200, reconnected.text)
+                self.assertFalse(reconnected.json()["created"])
                 denied = client.post("/api/v1/agents/register", headers={
                     "Host": "evil.example",
                 }, json={"name": "evil", "role": "worker"})

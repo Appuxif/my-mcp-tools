@@ -9,6 +9,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from agent_network.server import Config, create_app
+from auth_helpers import basic_headers
 from agent_network.store import MESSAGE_TTL_SECONDS
 
 
@@ -20,8 +21,8 @@ class AgentHudConversationTests(unittest.TestCase):
         self.client=self.cm.__enter__()
         self.agents={}
         for name in ("alpha","beta","charlie"):
-            identity=self.client.post("/api/v1/agents/register",json={
-                "name":name,"role":"tester","kind":"chatgpt"
+            identity=self.client.post("/api/v1/dashboard/agents",headers=basic_headers(self.app),json={
+                "name":name,"role":"tester","kind":"chatgpt", "teams": ["default"]
             }).json()
             self.agents[name]=identity
         self.store=self.app.state.store

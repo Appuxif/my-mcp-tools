@@ -103,8 +103,8 @@ class ApiTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def register(self, name, kind="chatgpt"):
-        response = self.client.post("/api/v1/agents/register", json={
-            "name": name, "role": "developer", "kind": kind,
+        response = self.client.post("/api/v1/dashboard/agents", json={
+            "name": name, "role": "developer", "kind": kind, "teams": ["default"],
         })
         self.assertEqual(response.status_code, 200, response.text[:300])
         return response.json()
@@ -112,8 +112,8 @@ class ApiTests(unittest.TestCase):
     def test_registration_http(self):
         agent = self.register("frontend")
         self.assertEqual(self.client.get("/api/v1/health").json()["agents"], 1)
-        self.assertEqual(self.client.post("/api/v1/agents/register", json={
-            "name": "frontend", "role": "different",
+        self.assertEqual(self.client.post("/api/v1/dashboard/agents", json={
+            "name": "frontend", "role": "different", "teams": ["default"],
         }).status_code, 409)
         response = self.client.post("/api/v1/agents/profile", json={
             "agent_id": agent["agent"]["agent_id"], "token": agent["token"],
@@ -130,7 +130,7 @@ class ApiTests(unittest.TestCase):
                                   "target", "PRIVATE MESSAGE BODY")
         with self.client.websocket_connect("/api/v1/channels/ws", headers={"Host":"127.0.0.1:8787"}) as ws:
             ws.send_json({
-                "type": "register", "kind": "chatgpt", "state": "idle",
+                "type": "register", "kind": "chatgpt", "teams": ["default"], "state": "idle",
                 "agent_id": b["agent"]["agent_id"], "token": b["token"],
             })
             reg = ws.receive_json()
@@ -164,7 +164,8 @@ class ApiTests(unittest.TestCase):
         })
         self.assertEqual(listed.status_code, 200, listed.text[:350])
         names = {t["name"] for t in listed.json()["result"]["tools"]}
-        self.assertTrue({"register_agent", "send_message", "get_messages", "ack_message"} <= names)
+        self.assertTrue({"list_agents", "send_message", "get_messages", "ack_message"} <= names)
+        self.assertNotIn("register_agent", names)
 
 
 class CodexTests(unittest.TestCase):

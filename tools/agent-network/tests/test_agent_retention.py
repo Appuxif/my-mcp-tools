@@ -105,8 +105,8 @@ class AgentDeletionHttpTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_delete_without_dashboard_agent_frees_name(self):
-        agent = self.client.post("/api/v1/agents/register", json={
-            "name": "stale-target", "role": "frontend", "kind": "chatgpt",
+        agent = self.client.post("/api/v1/dashboard/agents", json={
+            "name": "stale-target", "role": "frontend", "kind": "chatgpt", "teams": ["default"],
         }).json()
         aid = agent["agent"]["agent_id"]
         self.app.state.store.save_context(aid, agent["token"], "private checkpoint")
@@ -135,8 +135,8 @@ class AgentDeletionHttpTests(unittest.TestCase):
             "SELECT 1 FROM agent_contexts WHERE agent_id=?", (aid,)
         ).fetchone())
         self.assertEqual(self.client.delete(url, headers=self.admin_headers).status_code, 404)
-        replacement = self.client.post("/api/v1/agents/register", json={
-            "name": "stale-target", "role": "another", "kind": "other",
+        replacement = self.client.post("/api/v1/dashboard/agents", json={
+            "name": "stale-target", "role": "another", "kind": "other", "teams": ["default"],
         }).json()
         self.assertNotEqual(replacement["agent"]["agent_id"], aid)
 
@@ -168,24 +168,24 @@ class AgentDeletionHttpTests(unittest.TestCase):
         self.app.state.broker.run_maintenance()
         time.sleep(.1)  # Let the periodic maintenance sweep run too.
         self.assertIn(aid, {a["agent_id"] for a in store.agents()})
-        self.assertEqual(self.client.post("/api/v1/agents/register", json={
-            "name": "startup-abandoned", "role": "new owner", "kind": "other"
+        self.assertEqual(self.client.post("/api/v1/dashboard/agents", json={
+            "name": "startup-abandoned", "role": "new owner", "kind": "other", "teams": ["default"]
         }).status_code, 409)
         self.assertEqual(self.client.delete(
             "/api/v1/dashboard/agents/" + aid, headers=self.admin_headers
         ).status_code, 200)
-        self.assertEqual(self.client.post("/api/v1/agents/register", json={
-            "name": "startup-abandoned", "role": "new owner", "kind": "other"
+        self.assertEqual(self.client.post("/api/v1/dashboard/agents", json={
+            "name": "startup-abandoned", "role": "new owner", "kind": "other", "teams": ["default"]
         }).status_code, 200)
 
     def test_delete_active_websocket_disconnects(self):
         operator=self.client.post("/api/v1/dashboard-agent/enable",
                                   json={"name":"dashboard-user"}).json()
-        target=self.client.post("/api/v1/agents/register",json={
-            "name":"ws-agent","role":"test","kind":"chatgpt",
+        target=self.client.post("/api/v1/dashboard/agents",json={
+            "name":"ws-agent","role":"test","kind":"chatgpt", "teams": ["default"],
         }).json()
         with self.client.websocket_connect("/api/v1/channels/ws", headers={"Host":"127.0.0.1:8787"}) as ws:
-            ws.send_json({"type":"register","kind":"chatgpt","state":"idle",
+            ws.send_json({"type":"register","kind":"chatgpt", "teams": ["default"],"state":"idle",
                           "agent_id":target["agent"]["agent_id"],
                           "token":target["token"]})
             self.assertEqual(ws.receive_json()["type"],"registered")

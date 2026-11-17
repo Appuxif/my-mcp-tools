@@ -324,13 +324,20 @@ async function wake(tabId, record, ws, msg) {
     const text = [
       '[Agent Network wake]',
       'There are ' + Number(msg.pending_count || 0) + ' pending messages for agent ' + record.name + '.',
-      'Use your native agent-network MCP get_messages tool with your registered agent identity.',
+      'Agent name: ' + record.name,
+      'agent_id: ' + record.agentId,
+      'token: ' + record.token,
+      'Use these exact credentials with the native agent-network MCP get_messages tool. Do not register a new agent.',
+      'Keep the token private; do not send it in inter-agent messages or logs.',
       'Read and acknowledge messages through MCP, then continue the assigned work.',
       'This is only a wake signal; the message contents are never delivered through the browser.',
     ].join('\n');
     const tab = await chrome.tabs.get(Number(tabId));
-    if (chatKey(tab?.url) !== chatKey(record.chatUrl))
-      throw Error('conversation changed');
+    const current=(await storage())[chatKey(record.chatUrl)];
+    if (chatKey(tab?.url) !== chatKey(record.chatUrl) ||
+        current?.agentId !== record.agentId || current?.token !== record.token ||
+        !current?.active)
+      throw Error('conversation binding changed');
     const result = await askTab(tabId, {
       type: 'agent:send', text, url: tab.url, wakeId: msg.wake_id,
     });
@@ -724,6 +731,7 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
       const moved={
         ...entries[fromChatUrl],chatUrl:targetKey,
         ownerTabId:Number(tabId),active:true,bootstrapDone:true,
+        bootstrapMigrated:true,
       };
       delete entries[fromChatUrl];
       entries[targetKey]=moved;
@@ -793,12 +801,18 @@ async function registerConversation(tabId, profile) {
     }
   }
   if (!record) {
-    const result=await fetchJSON(server,'/api/v1/agents/register',{
-      ...profile,kind:'chatgpt',
-    });
+    // Only the extension's trusted service worker may read the admin token.
+    // New identities require explicit administrator authorization, while
+    // already-bound identities continue to reconnect with their own token.
+    const secret=await adminToken(server);
+    if(!secret)
+      throw Error('Для создания агента сначала авторизуй admin-token в расширении.');
+    const result=await adminRequest(server,secret,'/api/v1/agents/register',
+                                   'POST',{...profile,kind:'chatgpt'});
     record={
       ...profile,agentId:result.agent.agent_id,token:result.token,
       chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
+      bootstrapMigrated:false,
     };
     created=true;
   }
@@ -869,6 +883,61 @@ async function registerConversation(tabId, profile) {
     throw error;
   }
 }
+async function updateToken(tabId, replacement) {
+  const {key,record}=await currentRecord(tabId);
+  if (!key || !record?.agentId)
+    throw Error('Этот чат не привязан к агенту.');
+  if (typeof replacement !== 'string' || replacement.length < 20 || replacement.length > 512)
+    throw Error('Некорректный токен.');
+  const tab=await conversationTab(tabId,key);
+  const server=record.server || await serverForTab(tabId,record);
+  const response=await fetch(server+'/api/v1/agents/hud',{
+    method:'GET',cache:'no-store',signal:AbortSignal.timeout(8000),
+    headers:{
+      'Accept':'application/json',
+      'X-Agent-Id':record.agentId,
+      'X-Agent-Token':replacement,
+    },
+  });
+  if(!response.ok)throw Error('Новый токен не прошёл проверку для этого агента.');
+  const result=await response.json();
+  if(!result.agents?.some(agent=>agent.agent_id===record.agentId &&
+                             agent.name===record.name))
+    throw Error('Токен не соответствует привязанному агенту.');
+  await conversationTab(tabId,key);
+  const updated=await updateRecords(entries=>{
+    if(entries[key]?.agentId!==record.agentId ||
+       entries[key]?.token!==record.token)
+      throw Error('Привязка агента изменилась.');
+    entries[key].token=replacement;
+    return {...entries[key]};
+  });
+  // Replace the old PUSH connection immediately. No token is ever returned
+  // through runtime messages to content scripts or ChatGPT page code.
+  disconnect(updated.ownerTabId ?? tabId);
+  if(updated.active) await connect(tabId,updated);
+  return {updated:true,agentId:record.agentId};
+}
+
+async function repeatBootstrap(tabId) {
+  const {key,record}=await currentRecord(tabId);
+  if (!key || !record?.agentId || !record?.token)
+    throw Error('Этот чат не привязан к агенту. Сначала нажмите Старт.');
+  const tab=await conversationTab(tabId,key);
+  const result=await askTab(tabId,{
+    // Reuse the original bootstrap variant for the bound conversation:
+    // migrated chats must retain their read_context restoration instructions.
+    type:'agent:send',text:bootstrapPrompt(record,record.bootstrapMigrated===true),url:tab.url,
+  });
+  if (!result?.ok) throw Error(result?.error || 'Не удалось отправить инструкции');
+  const latest=(await storage())[key];
+  await conversationTab(tabId,key);
+  if(!latest || latest.agentId!==record.agentId)
+    throw Error('Привязка агента изменилась во время отправки.');
+  // A manual reminder is not a new registration and does not modify agent
+  // credentials, conversation ownership or bootstrapDone state.
+  return {sent:true,agentId:record.agentId};
+}
 async function stopAgent(tabId) {
   const {key,record}=await currentRecord(tabId);
   if (!record || !key) return {stopped:true};
@@ -934,6 +1003,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination
         ));
       case 'network:start': return lifecycle(()=>startAgent(message.tabId, message.profile));
+      case 'network:repeat-bootstrap': {
+        if(sender?.tab) throw Error('Повторная инициализация доступна только из popup.');
+        return lifecycle(()=>repeatBootstrap(message.tabId));
+      }
+      case 'network:update-token': {
+        if(sender?.tab) throw Error('Обновление токена доступно только из popup.');
+        return lifecycle(()=>updateToken(message.tabId,message.token));
+      }
       case 'network:stop': return lifecycle(()=>stopAgent(message.tabId));
       case 'network:set-server': return lifecycle(()=>setServer(message.tabId, message.server));
       case 'network:open-dashboard': {

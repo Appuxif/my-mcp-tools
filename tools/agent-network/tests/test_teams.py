@@ -91,7 +91,7 @@ class TeamStoreTests(unittest.TestCase):
         self.store.save_context(*auth, context="some notes")
         self.assertEqual([t["name"] for t in self.store.agents(requester_id=self.aid)[0]["teams"]],
                          ["Private Project"])
-        with self.assertRaises(TypeError):
+        with self.assertRaises(ValueError):
             self.store.register("Alpha", "worker", "other", agent_id=auth[0],
                                 token=auth[1], teams=["untrusted"])
         with self.assertRaises(TypeError):
@@ -212,24 +212,18 @@ class TeamHttpSecurityTests(unittest.TestCase):
             return raw.get("structuredContent") or raw
         tools=c.post("/mcp",json={"jsonrpc":"2.0","method":"tools/list",
                                  "id":1,"params":{}},headers=headers).json()["result"]["tools"]
-        register=next(t for t in tools if t["name"]=="register_agent")
-        self.assertNotIn("teams",register["inputSchema"]["properties"])
+        self.assertNotIn("register_agent", {t["name"] for t in tools})
         scoped=rpc("list_agents",{"agent_id":self.aid,"token":self.a["token"]},2)
         items=scoped.get("result",scoped)
         self.assertEqual([a["name"] for a in items], ["Alpha"])
-        # The MCP framework may ignore extra input fields, but they must
-        # never change memberships, even if injected by a client.
-        registered=rpc("register_agent",{"name":"Gamma","role":"Worker",
-                                        "teams":["Ops"]},3)
-        self.assertFalse(registered.get("isError",False))
+        # MCP clients cannot create agents even with custom team parameters.
+        rejected=rpc("register_agent",{"name":"Gamma","role":"Worker",
+                                       "teams":["Ops"]},3)
+        self.assertTrue(rejected.get("isError",True))
         row=self.app.state.store.db.execute(
             "SELECT agent_id FROM agents WHERE name='Gamma'"
         ).fetchone()
-        self.assertIsNotNone(row)
-        self.assertEqual(
-            [t["name"] for t in self.app.state.store._teams(row["agent_id"])],
-            ["default"]
-        )
+        self.assertIsNone(row)
 
 
 if __name__=="__main__":

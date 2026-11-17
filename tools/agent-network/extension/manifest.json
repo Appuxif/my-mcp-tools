@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Agent Network Wake",
-  "version": "0.5.0",
-  "description": "ChatGPT Agent Network: identity migration across chats, safe profile reuse and opt-in HUD.",
+  "version": "0.6.0",
+  "description": "ChatGPT Agent Network: admin-controlled agents, manual identity reminder, safe wake and HUD.",
   "permissions": [
     "storage",
     "tabs",

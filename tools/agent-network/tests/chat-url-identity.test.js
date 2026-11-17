@@ -14,13 +14,15 @@ const ADMIN_TEST_TOKEN='TEST_ADMIN_SECRET_'.repeat(4);
 function networkHarness({
   legacy=null,initial=null,urls=[PROJECT,PLAIN],
   newChatCreatesId=true,failMigrationSend=false,verifyFails=false,
-  registrationDelay=0,sendDelay=0,socketStartsOpen=true,
+  registrationDelay=0,sendDelay=0,socketStartsOpen=true,noAdmin=false,
+  rotatedToken=null,
 }={}) {
   const data = {
     agentsByChat:initial || {},
     agentsByTab:legacy || {},
     defaultServer:'http://127.0.0.1:8787',
-    serverByTab:{}
+    serverByTab:{},
+    ...(noAdmin ? {} : {adminTokenByServer:{'http://127.0.0.1:8787':ADMIN_TEST_TOKEN}}),
   };
   const tabs = new Map(urls.map((url,i)=>[i+10,{id:i+10,url}]));
   const events=[],sockets=[],listeners={},intervals=new Map();
@@ -130,6 +132,8 @@ function networkHarness({
       }};
     }
     if(url.endsWith('/api/v1/agents/register')){
+      if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
+        return {ok:false,status:403,async json(){return {detail:'Invalid admin token'}}};
       if(registrationDelay) await new Promise(resolve=>setTimeout(resolve,registrationDelay));
       created++;
       const id='uuid-identity-'+created;
@@ -141,7 +145,8 @@ function networkHarness({
       if(verifyFails) return {ok:false,status:403,async json(){return {detail:'Invalid token'}}};
       const agent=Object.values(data.agentsByChat)
         .find(a=>a?.agentId===options.headers['X-Agent-Id'] &&
-                 a?.token===options.headers['X-Agent-Token']);
+                 (a?.token===options.headers['X-Agent-Token'] ||
+                  (rotatedToken && rotatedToken===options.headers['X-Agent-Token'])));
       return {ok:!!agent,status:agent?200:403,async json(){
         return agent?{agents:[{agent_id:agent.agentId,name:agent.name}]}:{detail:'Invalid token'};
       }};
@@ -768,7 +773,7 @@ test('popup admin-token follows server origin and is not available in another ta
 });
 
 test('administrator secret never leaves the extension for a remote server',async()=>{
-  const h=networkHarness({urls:[PLAIN,OTHER]});
+  const h=networkHarness({urls:[PLAIN,OTHER],noAdmin:true});
   h.data.serverByTab[11]='https://remote.example';
   const result=await h.popupRequest(11,'network:admin-connect',{
     adminToken:ADMIN_TEST_TOKEN
@@ -797,4 +802,123 @@ test('HUD preference bridge requires a bound sender identity',async()=>{
   assert.equal((await h.request(11,'network:hud-preferences-get',{
     agentId
   })).ok,false);
+});
+
+test('new ChatGPT agent requires admin-token; no identity is created otherwise',async()=>{
+  const h=networkHarness({noAdmin:true});
+  const attempt=await h.start(10);
+  assert.equal(attempt.ok,false);
+  assert.match(attempt.error,/admin-token/);
+  assert.equal(h.registrations,0);
+  assert.equal(Object.keys(h.data.agentsByChat).length,0);
+  assert.equal((await h.popupRequest(10,'network:admin-connect',
+    {adminToken:ADMIN_TEST_TOKEN})).ok,true);
+  const retry=await h.start(10);
+  assert.equal(retry.ok,true,retry.error);
+  assert.equal(h.registrations,1);
+  const registration=h.events.find(e=>e.url.endsWith('/api/v1/agents/register'));
+  assert.ok(registration);
+  const bootstrap=h.events.find(e=>e.type==='agent:send').body.text;
+  assert.equal(bootstrap.includes(ADMIN_TEST_TOKEN),false);
+});
+
+test('popup can resend identical Start bootstrap without new registration',async()=>{
+  const h=networkHarness();
+  const started=await h.start(10);
+  assert.equal(started.ok,true,started.error);
+  const original=h.events.filter(e=>e.type==='agent:send').at(-1).body.text;
+  assert.match(original,/agent_id: uuid-identity-1/);
+  assert.match(original,/token: PRIVATE_AGENT_SECRET/);
+  const denied=await h.request(10,'network:repeat-bootstrap');
+  assert.equal(denied.ok,false);
+  assert.match(denied.error,/popup/);
+  const again=await h.popupRequest(10,'network:repeat-bootstrap');
+  assert.equal(again.ok,true,again.error);
+  assert.equal(again.agentId,'uuid-identity-1');
+  const sent=h.events.filter(e=>e.type==='agent:send').at(-1);
+  assert.equal(sent.body.text,original);
+  assert.equal(h.registrations,1);
+  assert.equal(h.data.agentsByChat[PLAIN].bootstrapDone,true);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+});
+
+test('repeat bootstrap preserves migration-specific read_context instructions',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER]});
+  const started=await h.start(10);
+  assert.equal(started.ok,true,started.error);
+  assert.equal(h.data.agentsByChat[PLAIN].bootstrapMigrated,false);
+
+  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  assert.equal(preview.ok,true,preview.error);
+  const transferred=await h.request(11,'network:migrate',{
+    agentId:preview.agentId,
+    fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(transferred.ok,true,transferred.error);
+  assert.equal(h.data.agentsByChat[OTHER].bootstrapMigrated,true);
+  const migratedText=h.events.filter(e=>e.type==='agent:send').at(-1).body.text;
+  assert.match(migratedText,/read_context\(agent_id, token\)/);
+  assert.match(migratedText,/Prior ChatGPT conversation history was not copied/);
+
+  const reminder=await h.popupRequest(11,'network:repeat-bootstrap');
+  assert.equal(reminder.ok,true,reminder.error);
+  const repeatedText=h.events.filter(e=>e.type==='agent:send').at(-1).body.text;
+  assert.equal(repeatedText,migratedText);
+  assert.equal(h.registrations,1);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].bootstrapMigrated,true);
+});
+
+test('waking a bound agent includes the exact agent ID and token, not admin credentials',async()=>{
+  const h=networkHarness();
+  await h.start(10);
+  const ws=h.sockets.at(-1);
+  ws.receive({type:'wake',wake_id:'w-credentials',pending_count:2});
+  await h.tick();
+  const wake=h.events.filter(e=>e.type==='agent:send' && e.body.wakeId==='w-credentials');
+  assert.equal(wake.length,1);
+  assert.match(wake[0].body.text,/agent_id: uuid-identity-1/);
+  assert.match(wake[0].body.text,/token: PRIVATE_AGENT_SECRET/);
+  assert.match(wake[0].body.text,/Do not register a new agent/);
+  assert.equal(wake[0].body.text.includes(ADMIN_TEST_TOKEN),false);
+  assert.equal(h.events.some(e=>e.payload?.type==='wake_result' &&
+                              e.payload.wake_id==='w-credentials' &&
+                              e.payload.status==='submitted'),true);
+});
+
+test('popup updates a rotated token only after server verification and restarts PUSH',async()=>{
+  const h=networkHarness({rotatedToken:'ROTATED_TOKEN_LONG_ENOUGH_987654'});
+  const started=await h.start(10);
+  assert.equal(started.ok,true,started.error);
+  const old=h.sockets.at(-1);
+  const denied=await h.request(10,'network:update-token',
+    {token:'ROTATED_TOKEN_LONG_ENOUGH_987654'});
+  assert.equal(denied.ok,false);
+  assert.match(denied.error,/popup/);
+  const bad=await h.popupRequest(10,'network:update-token',{token:'wrong'});
+  assert.equal(bad.ok,false);
+  assert.equal(h.data.agentsByChat[PLAIN].token,'PRIVATE_AGENT_SECRET');
+  const result=await h.popupRequest(10,'network:update-token',
+    {token:'ROTATED_TOKEN_LONG_ENOUGH_987654'});
+  assert.equal(result.ok,true,result.error);
+  assert.equal(result.updated,true);
+  assert.equal(h.data.agentsByChat[PLAIN].token,'ROTATED_TOKEN_LONG_ENOUGH_987654');
+  assert.equal(old.closed,true);
+  assert.equal(h.sockets.length,2);
+  assert.equal(JSON.stringify(result).includes('ROTATED_TOKEN_LONG_ENOUGH_987654'),false);
+  const bootstrap=await h.popupRequest(10,'network:repeat-bootstrap');
+  assert.equal(bootstrap.ok,true,bootstrap.error);
+  assert.match(h.events.filter(e=>e.type==='agent:send').at(-1).body.text,
+    /token: ROTATED_TOKEN_LONG_ENOUGH_987654/);
+});
+
+test('resending identity is blocked when conversation navigation invalidates binding',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER]});
+  await h.start(10);
+  h.tabs.get(10).url=OTHER;
+  const response=await h.popupRequest(10,'network:repeat-bootstrap');
+  assert.equal(response.ok,false);
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,1,
+    'only the original bootstrap may have been sent');
 });

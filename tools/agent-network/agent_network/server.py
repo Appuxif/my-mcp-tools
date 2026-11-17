@@ -48,6 +48,15 @@ class AgentCreate(BaseModel):
     token: str = ""
 
 
+class AdminAgentCreate(BaseModel):
+    name: str
+    role: str
+    kind: str = "other"
+    purpose: str = ""
+    description: str = ""
+    teams: list[str]
+
+
 class AgentProfile(BaseModel):
     agent_id: str
     token: str
@@ -262,11 +271,12 @@ def create_app(config: Config | None = None) -> FastAPI:
         "agent-network",
         instructions=(
             "Agents communicate only with peers sharing at least one team. "
-            "Team membership is read-only for agents. Newly registered agents "
-            "join default; only the human administrator can assign teams via "
-            "Dashboard or a configured extension. list_agents is scoped to shared teams. "
-            "Messages are delivered over native MCP. Register a stable agent identity "
-            "once, retain its per-agent token, and use that identity in further calls. "
+            "Team membership and identity creation are read-only for agents. "
+            "Only a human administrator can create an agent through Dashboard or "
+            "an authorized Chrome extension. The administrator provides your "
+            "existing agent_id and token; native MCP has no registration tool. "
+            "Never create an alternate identity. list_agents is scoped to shared "
+            "teams. Messages are delivered over native MCP. "
             "Use get_messages to read pending messages and ack_message only after "
             "you have received them. Only on explicit user request, use save_context "
             "to store a compact summary. Use read_context on user request or after "
@@ -286,12 +296,8 @@ def create_app(config: Config | None = None) -> FastAPI:
             resolved_agent_id = ""
             try:
                 result = fn(*args, **kwargs)
-                if fn.__name__ == "register_agent":
-                    resolved_agent_id = result["agent"]["agent_id"]
-                else:
-                    # The only way here is through the successfully authenticated
-                    # handler; failed attempts remain unattributed.
-                    resolved_agent_id = str(kwargs.get("agent_id") or "")
+                # Tool calls are authenticated by the handler. Never record tokens.
+                resolved_agent_id = str(kwargs.get("agent_id") or "")
                 return result
             except Exception:
                 status = "error"
@@ -303,15 +309,6 @@ def create_app(config: Config | None = None) -> FastAPI:
                     agent_id=resolved_agent_id
                 )
         return logged
-
-    @mcp.tool()
-    @audit
-    def register_agent(name: str, role: str, kind: str = "other", purpose: str = "",
-                       description: str = "", agent_id: str = "", token: str = "") -> dict:
-        """Register an agent. Returns a new per-agent token once; for reconnection
-        supply the original agent_id and token. Initial team: default.
-        Agents cannot assign themselves to teams. Keep token private."""
-        return store.register(name, role, kind, purpose, description, agent_id, token)
 
     @mcp.tool()
     @audit
@@ -571,6 +568,30 @@ def create_app(config: Config | None = None) -> FastAPI:
         return JSONResponse({"items": store.team_list()},
                             headers={"Cache-Control": "no-store"})
 
+    @app.post("/api/v1/dashboard/agents")
+    def dashboard_create_agent(body: AdminAgentCreate, req: Request) -> JSONResponse:
+        """Explicit administrator provision; one-time credential response."""
+        require_dashboard_admin(req)
+        if body.kind not in ("chatgpt", "codex", "claude", "other"):
+            raise HTTPException(400, "Invalid agent kind")
+        try:
+            result = store.register(body.name, body.role, body.kind,
+                                    body.purpose, body.description, teams=body.teams)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/v1/dashboard/agents/{target_agent_id}/credentials/rotate")
+    async def dashboard_rotate_credentials(target_agent_id: str, req: Request) -> JSONResponse:
+        """Explicit admin token rotation; old tokens become invalid."""
+        require_dashboard_admin(req)
+        try:
+            credentials = store.rotate_agent_token(target_agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Agent not found") from exc
+        await broker.disconnect_agent(target_agent_id)
+        return JSONResponse(credentials, headers={"Cache-Control": "no-store"})
+
     @app.put("/api/v1/dashboard/agents/{target_agent_id}/teams")
     def dashboard_assign_teams(target_agent_id: str, body: TeamAssignment,
                                req: Request) -> dict:
@@ -741,9 +762,21 @@ def create_app(config: Config | None = None) -> FastAPI:
         )
 
     @app.post("/api/v1/agents/register")
-    def register_api(req: AgentCreate) -> dict:
+    def register_api(body: AgentCreate, req: Request) -> JSONResponse:
+        """Chrome extension: new identities need the admin token.
+
+        An existing identity can reconnect using its own registered ID/token
+        without admin approval. Neither route can change team memberships.
+        """
+        if not (body.agent_id and body.token):
+            require_extension_admin(req)
+            if body.agent_id or body.token:
+                raise HTTPException(400, "Reconnect requires both agent_id and token")
+            if body.kind != "chatgpt":
+                raise HTTPException(400, "Extension registration requires kind=chatgpt")
         try:
-            return store.register(**req.model_dump())
+            result = store.register(**body.model_dump())
+            return JSONResponse(result, headers={"Cache-Control": "no-store"})
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:

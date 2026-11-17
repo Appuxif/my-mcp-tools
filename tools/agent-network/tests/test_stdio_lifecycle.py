@@ -37,7 +37,7 @@ class StdioLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     result = await session.initialize()
                     self.assertEqual(result.server_info.name, "agent-network")
                     tools = await session.list_tools()
-                    self.assertEqual(len(tools.tools), 9)
+                    self.assertEqual(len(tools.tools), 8)
                     async with httpx.AsyncClient(timeout=3) as client:
                         password=(Path(tmp)/"admin-token").read_text().strip()
                         basic="Basic "+base64.b64encode(

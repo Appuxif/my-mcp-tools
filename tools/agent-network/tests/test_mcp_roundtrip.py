@@ -55,16 +55,15 @@ class McpRoundTripTests(unittest.TestCase):
                 self.assertEqual(initialize["serverInfo"]["name"], "agent-network")
                 names = {x["name"] for x in rpc("tools/list", {}, 2)["tools"]}
                 for expected in (
-                    "register_agent", "list_agents", "send_message", "get_messages",
+                    "list_agents", "send_message", "get_messages",
                     "ack_message", "update_task", "heartbeat",
                     "save_context", "read_context",
                 ):
                     self.assertIn(expected, names)
-
-                alice = tool("register_agent", {
-                    "name": "test-alice", "role": "MCP tester", "kind": "other"}, 3)
-                bob = tool("register_agent", {
-                    "name": "test-bob", "role": "MCP tester", "kind": "other"}, 4)
+                self.assertNotIn("register_agent", names)
+                # Admin provisioning happens outside MCP before agents use tools.
+                alice = app.state.store.register("test-alice", "MCP tester", "other")
+                bob = app.state.store.register("test-bob", "MCP tester", "other")
                 a_auth = {"agent_id": alice["agent"]["agent_id"],
                           "token": alice["token"]}
                 b_auth = {"agent_id": bob["agent"]["agent_id"],

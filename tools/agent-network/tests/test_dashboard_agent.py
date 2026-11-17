@@ -162,8 +162,8 @@ class DashboardAgentHttpTests(unittest.TestCase):
         self.assertEqual(identity["agent"]["kind"], "dashboard")
         self.assertTrue(identity["agent"]["online"])
         auth = {"X-Agent-Id":dash_id, "X-Agent-Token":identity["token"]}
-        other = c.post("/api/v1/agents/register",json={
-            "name":"remote-dev","kind":"codex","role":"Developer",
+        other = c.post("/api/v1/dashboard/agents",json={
+            "name":"remote-dev","kind":"codex", "teams": ["default"],"role":"Developer",
         }).json()
         agents = c.get("/api/v1/agents").json()
         self.assertIn("dashboard-qa", [r["name"] for r in agents])
@@ -213,16 +213,19 @@ class DashboardAgentHttpTests(unittest.TestCase):
         self.assertEqual(c.get("/api/v1/dashboard/tool-history?page=11").status_code,422)
         self.assertEqual(c.get("/api/v1/dashboard/tool-history").json()["total"],0)
         h={"Content-Type":"application/json","Accept":"application/json, text/event-stream"}
+        created=c.post("/api/v1/dashboard/agents",json={
+            "name":"observer","role":"tester","kind":"other","teams":["default"]
+        }).json()
         result=c.post("/mcp",headers=h,json={
             "jsonrpc":"2.0","id":12,"method":"tools/call",
-            "params":{"name":"register_agent","arguments":{
-                "name":"observer","role":"tester","kind":"other",
+            "params":{"name":"heartbeat","arguments":{
+                "agent_id":created["agent"]["agent_id"],"token":created["token"],
             }},
         })
         self.assertEqual(result.status_code,200)
         audit = c.get("/api/v1/dashboard/tool-history").json()
         self.assertEqual(audit["total"],1)
-        self.assertEqual(audit["items"][0]["tool_name"],"register_agent")
+        self.assertEqual(audit["items"][0]["tool_name"],"heartbeat")
         self.assertEqual(audit["items"][0]["status"],"ok")
         self.assertGreaterEqual(audit["items"][0]["duration_ms"],0)
         self.assertNotIn("token",json.dumps(audit))

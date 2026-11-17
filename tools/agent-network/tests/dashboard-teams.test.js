@@ -7,7 +7,7 @@ const Graph=require('../dashboard/graph-utils.js');
 
 const src=fs.readFileSync(path.join(__dirname,'../dashboard/dashboard.js'),'utf8');
 
-function harness({graphNetwork=null,savedTeams=null}={}) {
+function harness({graphNetwork=null,savedTeams=null,rotationConfirmed=true}={}) {
   class El {
     constructor(tag='div') {
       this.tagName=tag.toUpperCase();this.id='';this.className='';
@@ -26,6 +26,7 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
       this._text='';this.children=[...children];
     }
     focus(){document.activeElement=this;}
+    select(){this.selected=true;}
     addEventListener(kind,callback){(this.listeners[kind]??=[]).push(callback);}
     setAttribute(name,value){this.attributes[name]=String(value);}
     insertBefore(element,before){
@@ -49,6 +50,7 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
   };
   let memberNames=['default'];
   const requests=[];
+  const copied=[];
   const preferences=new Map();
   if(savedTeams!==null) preferences.set('agentNetwork.graph.selectedTeams',JSON.stringify(savedTeams));
   const localStorage={
@@ -70,6 +72,11 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
   const fetch=async(url,options={})=>{
     requests.push({url:String(url),options});
     const method=options.method||'GET';
+    if(method==='POST' && String(url).endsWith('/credentials/rotate')) {
+      return {ok:true,status:200,async json(){return {
+        agent_id:'A',name:'Worker',token:'REPLACEMENT_TOKEN_EXAMPLE'
+      };}};
+    }
     if(method==='PUT'){
       assert.equal(options.credentials,'same-origin');
       const input=JSON.parse(options.body);
@@ -81,6 +88,8 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
   const ctx=vm.createContext({
     document,fetch,URL,location:{origin:'http://127.0.0.1:8787'},
     console,AgentNetworkGraph:Graph,localStorage,setInterval(){},
+    window:{confirm(){return rotationConfirmed;}},
+    navigator:{clipboard:{async writeText(value){copied.push(value);}}},
     CustomEvent:class {constructor(type,options){this.type=type;this.detail=options?.detail;}},
   });
   vm.runInContext(src,ctx);
@@ -93,7 +102,7 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
     return null;
   };
   const flush=async()=>{for(let i=0;i<10;i++)await new Promise(r=>setImmediate(r));};
-  return {get,find,flush,document,requests,preferences,
+  return {get,find,flush,document,requests,preferences,copied,
     memberNames:()=>memberNames};
 }
 
@@ -257,4 +266,49 @@ test('map restores saved filter across page reload, drops missing team IDs',asyn
   h.get('graph-teams-all').click();
   assert.deepEqual(JSON.parse(h.preferences.get('agentNetwork.graph.selectedTeams')),[]);
   assert.deepEqual(mapNodeNames(h),['Alpha','Beta','Shared','Default']);
+});
+
+test('inspector ID copy works without rotating token',async()=>{
+  const h=harness();await h.flush();
+  const inspector=h.get('inspector');
+  h.find(inspector,'inspector-identity-actions').children[0].click();
+  await h.flush();
+  assert.deepEqual(h.copied,['A']);
+  assert.equal(h.requests.some(r=>r.options.method==='POST'),false);
+});
+
+test('admin rotation requires confirmation, shows token and survives polling',async()=>{
+  const h=harness();await h.flush();
+  const inspector=h.get('inspector');
+  const [idButton,rotate,copyToken]=h.find(inspector,'inspector-identity-actions').children;
+  assert.equal(copyToken.hidden,true);
+  rotate.click();
+  await h.flush();
+  const post=h.requests.find(r=>r.options.method==='POST');
+  assert.ok(post);
+  assert.ok(post.url.endsWith('/api/v1/dashboard/agents/A/credentials/rotate'));
+  assert.equal(post.options.credentials,'same-origin');
+  assert.equal(post.options.cache,'no-store');
+  assert.equal(post.options.headers['X-Agent-Network-Admin-Token'],undefined);
+  const field=h.find(inspector,'field inspector-token-result');
+  assert.equal(field.value,'REPLACEMENT_TOKEN_EXAMPLE');
+  assert.equal(field.hidden,false);
+  assert.equal(copyToken.hidden,false);
+  assert.equal(h.copied.at(-1),'REPLACEMENT_TOKEN_EXAMPLE');
+  h.document.dispatchEvent({type:'agent-network:refresh'});
+  await h.flush();
+  assert.equal(h.find(h.get('inspector'),'field inspector-token-result'),field);
+  assert.equal(field.value,'REPLACEMENT_TOKEN_EXAMPLE');
+  copyToken.click();
+  await h.flush();
+  assert.equal(h.copied.at(-1),'REPLACEMENT_TOKEN_EXAMPLE');
+  assert.equal(h.requests.filter(r=>r.options.method==='POST').length,1);
+});
+
+test('cancelled rotation never contacts server',async()=>{
+  const h=harness({rotationConfirmed:false});await h.flush();
+  const rotate=h.find(h.get('inspector'),'inspector-identity-actions').children[1];
+  rotate.click();await h.flush();
+  assert.equal(h.requests.some(r=>r.options.method==='POST'),false);
+  assert.equal(h.find(h.get('inspector'),'field inspector-token-result').hidden,true);
 });

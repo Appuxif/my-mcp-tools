@@ -6,6 +6,7 @@ const path = require('node:path');
 
 const SOURCE = fs.readFileSync(path.join(__dirname, '../extension/background.js'), 'utf8');
 const CHAT = 'https://chatgpt.com/c/test-agent';
+const ADMIN_SECRET = 'TEST_ADMIN_SECRET_'.repeat(4);
 
 function startHarness({hudInstalled=true,registrationError=false,existing=false}={}) {
   const events=[];
@@ -18,6 +19,7 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
   const data={
     agentsByChat:existing ? {[CHAT]:original} : {},
     serverByTab:{},defaultServer:'http://127.0.0.1:8787',
+    adminTokenByServer:{'http://127.0.0.1:8787':ADMIN_SECRET},
   };
   const tab={id:7,url:CHAT};
   let onMessage;
@@ -52,6 +54,7 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
       },
     },
     storage:{local:{
+      async setAccessLevel(){},
       async get(key) {
         if(Array.isArray(key))return Object.fromEntries(key.filter(k=>k in data).map(k=>[k,structuredClone(data[k])]));
         return {[key]:structuredClone(data[key])};
@@ -72,6 +75,7 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
     assert.equal(options.method,'POST');
     events.push({kind:'fetch',url});
     if(url.endsWith('/api/v1/agents/register')) {
+      assert.equal(options.headers['X-Agent-Network-Admin-Token'],ADMIN_SECRET);
       if(registrationError)return {ok:false,status:503,async json(){return {detail:'Unavailable'}}};
       return {ok:true,status:200,async json(){return {agent:{agent_id:'a1'},token:'SECRET_NOT_FOR_HUD'}}};
     }

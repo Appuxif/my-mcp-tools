@@ -345,6 +345,88 @@
     const body = add(header, 'div', '');
     const headerName = add(body, 'strong', '', agent.name);
     const headerRole = add(body, 'span', '', agent.role || agent.kind);
+
+    // Credentials never come from the dashboard snapshot. The ID is public
+    // metadata; replacing the token requires an explicit admin action.
+    const identity = add(el, 'div', 'inspector-identity');
+    const agentId = add(identity, 'code', 'inspector-agent-id', agent.agent_id);
+    agentId.title = agent.agent_id;
+    const actions = add(identity, 'div', 'inspector-identity-actions');
+    const copyId = add(actions, 'button', 'chat-refresh', 'Копировать ID');
+    copyId.type = 'button';
+    const rotate = add(actions, 'button', 'chat-refresh', 'Перевыпустить токен');
+    rotate.type = 'button';
+    rotate.title = 'Создаст новый токен, старый немедленно перестанет работать';
+    const tokenNotice = add(identity, 'span', 'inspector-token-notice',
+      'Старый токен хранится только как хеш. Для копирования нужен перевыпуск.');
+    const resultInput = add(identity, 'input', 'field inspector-token-result');
+    resultInput.type = 'text';
+    resultInput.readOnly = true;
+    resultInput.hidden = true;
+    resultInput.autocomplete = 'off';
+    const copySecret = add(actions, 'button', 'chat-refresh', 'Копировать новый токен');
+    copySecret.type = 'button';
+    copySecret.hidden = true;
+    copyId.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(agent.agent_id);
+        tokenNotice.textContent = 'Agent ID скопирован.';
+      } catch {
+        tokenNotice.textContent = 'Не удалось скопировать ID: выделите текст вручную.';
+      }
+    });
+    let currentSecret = '';
+    copySecret.addEventListener('click', async () => {
+      if (!currentSecret) return;
+      try {
+        await navigator.clipboard.writeText(currentSecret);
+        tokenNotice.textContent = 'Новый токен скопирован.';
+      } catch {
+        resultInput.focus();
+        resultInput.select();
+        tokenNotice.textContent = 'Выделен новый токен. Скопируйте его вручную.';
+      }
+    });
+    rotate.addEventListener('click', async () => {
+      if (!window.confirm('Перевыпустить токен агента «' + agent.name +
+          '»? Старый токен сразу перестанет работать. ' +
+          'Новый нужно передать агенту и обновить его подключение.')) return;
+      rotate.disabled = true;
+      copySecret.hidden = true;
+      resultInput.hidden = true;
+      currentSecret = '';
+      tokenNotice.textContent = 'Перевыпускаю токен…';
+      try {
+        const response = await fetch(new URL(
+          '/api/v1/dashboard/agents/' + encodeURIComponent(agent.agent_id) +
+          '/credentials/rotate', location.origin).href, {
+          method:'POST', cache:'no-store', credentials:'same-origin',
+          headers:{'Accept':'application/json'},
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw Error(data.detail || 'HTTP ' + response.status);
+        if (data.agent_id !== agent.agent_id || typeof data.token !== 'string' ||
+            !data.token) throw Error('Некорректный ответ сервера');
+        currentSecret = data.token;
+        resultInput.value = currentSecret;
+        resultInput.hidden = false;
+        copySecret.hidden = false;
+        tokenNotice.textContent = 'Токен обновлён, старый недействителен. ' +
+          'Скопируйте новый токен и передайте агенту.';
+        try {
+          await navigator.clipboard.writeText(currentSecret);
+          tokenNotice.textContent = 'Токен перевыпущен и скопирован. ' +
+            'Старый недействителен; обновите credentials агента.';
+        } catch {
+          resultInput.focus();
+          resultInput.select();
+        }
+      } catch (error) {
+        tokenNotice.textContent = 'Ошибка: ' + String(error.message || error);
+      } finally {
+        rotate.disabled = false;
+      }
+    });
     const fieldValues = fields.map(([label, value]) => {
       const row = add(el, 'div', 'inspect-row');
       add(row, 'span', '', label);

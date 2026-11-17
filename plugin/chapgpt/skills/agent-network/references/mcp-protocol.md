@@ -2,11 +2,10 @@
 
 Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## Nine native MCP tools (not Dashboard HTTP endpoints)
+## Eight native MCP tools (not Dashboard HTTP endpoints)
 
 | Tool | Arguments | Result |
 |---|---|---|
-| `register_agent` | `name`, `role`; optional `kind="other"`, `purpose`, `description`, `agent_id`, `token` | `agent`, `token`, `created`: create or reconnect an identity. |
 | `list_agents` | `agent_id`, `token` | Only the caller and agents sharing at least one team; includes intersecting team IDs/names, roles, status and activity. |
 | `send_message` | `agent_id`, `token`, `to`, `text`; optional `task_id`, `client_message_id` | `message_id`, `duplicate`. `to` accepts a name or UUID. |
 | `get_messages` | `agent_id`, `token`; optional `limit=30` (1–100) | Pending messages: `message_id`, `sender_name`, `body`, `task_id`, `created_at`, etc. Does **not** consume messages. |
@@ -28,22 +27,57 @@ call_tool(server="agent-network", tool="get_messages",
 
 An agent connected directly to the native MCP calls `get_messages` without going through My MCP Tools or an extra adapter.
 
-## Registration and unique names
+## Administrative provisioning and identity continuity
 
-- Registration requires `name` (unique) and `role`. Use `kind=chatgpt` for a ChatGPT extension agent, `kind=codex` for Codex, or `other` / supported `claude` for other agents. `kind=dashboard` is intended for the HTTP dashboard: a plain `register_agent` call does not enable dashboard mode.
-- To reconnect to an existing identity, supply the **same** `name`, `agent_id`, and `token`. Do not try to take over another registration simply because its name exists.
-- Registration **always places new identities into team `default`**.
-  `register_agent` and `update_profile` do **not** accept team mutations.
-  Agents have no team-write MCP tool. Reconnect preserves existing memberships.
-- `token` is an agent secret. Do not send it to peers, publish it, or commit it to Git. The ChatGPT extension's bootstrap prompt includes the token in the conversation history; this local MVP does **not** provide production-grade secret isolation.
-- An identity is deleted **only manually** by an authorized dashboard user; inactivity never expires it. After manual deletion its old `agent_id`, `token`, and saved summary are invalidated; the freed name can be registered again.
+- **New identities require the human administrator.** In local Dashboard,
+  open **Пул агентов → + Создать агента** and choose a unique `name`,
+  `role`, `kind` (`codex`, `chatgpt`, `claude`, `other`), purpose,
+  description, and 1–12 team names. The server creates the agent and its
+  initial memberships in a single transaction.
+- `POST /api/v1/dashboard/agents` requires Dashboard HTTP Basic
+  authentication and same-origin/loopback checks. It returns
+  `{agent, token, created:true}` once, with `Cache-Control: no-store`.
+  `token` is stored only as a SHA-256 hash; normal snapshot/list routes never return it.
+  Admins can copy the agent ID at any time. `POST
+  /api/v1/dashboard/agents/{agent_id}/credentials/rotate` requires HTTP Basic
+  and explicitly issues a fresh token while invalidating the old one. The
+  new token is returned in that one response only; no GET endpoint can
+  recover the original from a hash. Agent identity, memberships, messages
+  and saved context remain unchanged; active PUSH sockets are closed.
+- The Dashboard can copy `agent_id` and `token`, or download a local
+  `.agent.env` with `AGENT_NETWORK_AGENT_ID`,
+  `AGENT_NETWORK_TOKEN`, and `AGENT_NETWORK_AGENT_NAME`. Keep it
+  outside Git and use file permissions `chmod 600`. Environment files do
+  not automatically inject credentials into Codex MCP tool arguments.
+- The Chrome Extension popup displays and copies its bound agent ID,
+  can resend the exact Start bootstrap with **Напомнить агенту контекст**,
+  and may import a newly rotated token after server verification.
+  Every wake prompt includes that agent's ID and token so the LLM can call
+  `get_messages` again; no message bodies or admin secrets are forwarded.
+- **Chrome Extension:** its trusted worker may create a new ChatGPT agent
+  through `POST /api/v1/agents/register` only after the human supplies
+  the local `admin-token` via the popup. Registration with no admin
+  token is forbidden. Existing agents may reconnect to that HTTP endpoint
+  using their existing matching `name`, `agent_id`, and `token`.
+  No reconnect changes team membership; registration through native MCP
+  is entirely unavailable.
+- Agent names are globally unique. Never invent identities or store secrets
+  in prompts, Git, inter-agent messages or logs. A token must be delivered
+  privately to its intended client. The ChatGPT Extension bootstrap includes
+  the agent's own token in that chat's history; this local MVP does not
+  provide production-grade secret isolation.
+- Deletion is manual; it removes identity, token validity, messages, and
+  any persistent compact context. Inactivity never deletes identities.
+  If credentials are lost, an administrator can delete and recreate the
+  agent, but its previous identity and data will not survive.
 
 ## Teams and visibility
 
 Team membership is many-to-many, managed exclusively by a trusted human
 administrator through the local Dashboard or an authenticated Chrome
 extension popup. Existing agents are assigned `default` during the
-one-time schema migration; all new registrations also begin in `default`.
+one-time schema migration; extension registrations start in `default`,
+while Dashboard provisioning can choose initial teams (without `default`).
 
 - `list_agents` is authenticated and returns only the caller and peers
   sharing at least one team, never all server agents. The caller's `teams`

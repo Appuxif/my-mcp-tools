@@ -1,9 +1,9 @@
 ---
 name: agent-network
-description: "Coordinate ChatGPT, Codex CLI and other agents through nine native agent-network MCP tools: registration and migration, team-scoped peer discovery and send/get/ack, task status, heartbeat, save_context/read_context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
+description: "Coordinate ChatGPT, Codex CLI and other agents through eight native agent-network MCP tools: credential-scoped communication, team-scoped peer discovery and send/get/ack, task status, heartbeat, save_context/read_context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.3.0"
+  version: "1.5.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -13,24 +13,36 @@ metadata:
 ## Connection and registration
 
 1. When accessing the network through My MCP Tools, discover `list_servers`, then `list_tools(server="agent-network")` and `get_tool_schema`. Invoke tools with `call_tool(server="agent-network", tool=..., arguments=...)`. Agents with a direct MCP connection call those tools directly.
-2. **Check whether you already have an identity.** The ChatGPT extension registers the agent on startup and provides `name`, `role`, `agent_id`, and `token` in the chat. Do not call `register_agent` again if you already have these credentials.
-3. For a new agent, call `register_agent(name, role, kind?, purpose?, description?)`. Store the returned `agent_id` and `token` only in a trusted environment. To reconnect to an existing registration, supply `name`, `agent_id`, and `token`. Agent names are unique.
+2. **Check your existing identity.** The human administrator must first
+   provision the agent via the authenticated Dashboard (**Пул агентов →
+   + Создать агента**), or create a ChatGPT agent through the Chrome Extension
+   after authenticating the popup with the local `admin-token`.
+   The agent itself **must not invent, register or impersonate identities**.
+3. Obtain the administrator-supplied `agent_id` and `token` through a
+   trusted channel (or a private `.agent.env` file). Use these same
+   credentials on every native MCP call, including after reconnect. The
+   `.agent.env` file is a storage convention, not automatic MCP injection;
+   the client must still supply the credentials. The extension stores its
+   agent credentials in extension-local storage. Keep the identity stable.
 4. Never share your token with other agents, include it in inter-agent messages, write it to logs or Git, or reveal it in your final response. Never guess IDs or tokens.
 5. Start with `get_messages`; use `list_agents` as needed to discover peers and inspect their roles, purposes, and status. After a **user-initiated migration to a new conversation**, also call `read_context(agent_id, token)` once to restore any previously saved summary.
 
-## Native MCP tool surface (9 tools)
+## Native MCP tool surface (8 tools)
 
 | Purpose | Tool |
 |---|---|
-| Identity creation or credential-based reconnect | `register_agent` |
 | Team-scoped peer discovery | `list_agents` |
 | Durable message queue / delivery | `send_message`, `get_messages`, `ack_message` |
 | Task status and presence | `update_task`, `heartbeat` |
 | User-directed durable compact summaries | `save_context`, `read_context` |
 
-`register_agent` retains global unique names and initial `default` team membership.
-There is **no native MCP tool** for altering teams or reading another
-agent's saved context. For exact tool signatures see
+**Agent creation is administrator-only; there is no `register_agent`
+MCP tool.** The Dashboard provides an ID/token at registration and can
+later copy the ID or explicitly **rotate** the token (the old one becomes
+invalid). It also exports a private `.agent.env` file. The Chrome Extension can also create
+new ChatGPT identities only after its operator authorizes the admin-token.
+There is no native MCP tool for changing teams or reading another agent's
+saved context. For exact tool signatures see
 [the MCP protocol reference](references/mcp-protocol.md).
 
 ## Agent workflow
@@ -44,10 +56,11 @@ agent's saved context. For exact tool signatures see
 
 ## Team membership (read-only for agents)
 
-- New agents join team `default`; existing agents are migrated into that
-  team once when the team schema first appears. Each agent may belong to
-  several teams, but **only an administrator** can assign or revoke them.
-- **Never attempt to set teams through `register_agent` or `update_profile`.**
+- Dashboard-provisioned agents receive the administrator's chosen team
+  membership atomically on creation. Chrome Extension registrations start in
+  `default`; existing agents were migrated into it once. Agents may belong
+  to multiple teams, but **only an administrator** can assign or revoke them.
+- **Never attempt to create an identity or change teams through native MCP.****
   No MCP team-mutation tool exists. `list_agents` includes your own `teams`
   and peers who share **at least one** team. Peers expose only the team names/IDs
   they share with you.
@@ -114,7 +127,7 @@ with 20-second heartbeats. Unknown state prevents unsafe wake; a separate
 `--state-file` can provide reliable activity for custom launchers, while
 `--assume-idle` is explicitly unsafe. This is **not an MCP proxy**.
 
-**Other local or remote agents:** they can use all nine MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
+**Other local or remote agents:** they can use all eight MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
 
 See [Wake channels and adapters](references/wake-channels.md) for setup details.
 
@@ -123,6 +136,22 @@ See [Wake channels and adapters](references/wake-channels.md) for setup details.
 - `send_message` confirms queuing, **not receipt or task completion**. A `wake_result=submitted/queued` does not prove the message was processed; look for MCP activity, ACK, or a reply.
 - Without an adapter, messages wait for the next `get_messages`. Both `pending` and `acknowledged` messages expire **24 hours after creation**; delivery is not guaranteed indefinitely.
 - **Agents and saved summaries never expire due to inactivity.** Only an authorized manual dashboard deletion removes the identity and its context; the name then becomes available. The 24-hour TTL applies to messages, not agents.
+- To provision a new Codex/CLI agent: administrator opens Dashboard,
+  selects **+ Создать агента**, sets initial teams, copies the newly issued
+  ID/token or downloads `.agent.env`, and hands them to the intended client
+  (never Git). The old token cannot be recovered from its hash. The admin
+  may explicitly rotate it in the inspector, immediately invalidating the
+  previous credentials without deleting agent history/context. A new
+  ChatGPT agent created with the Extension requires its own preconfigured
+  admin-token.
+- A ChatGPT agent can use the popup **↻ Напомнить агенту контекст**
+  to resend its original identity bootstrap, including agent ID and own
+  token (not admin-token), without changing identity or teams. Its wake
+  prompt also provides agent ID/token for `get_messages`; queued message
+  bodies never travel in wake prompts. The popup displays/copies `agent_id`.
+  After an admin token rotation, enter the new token in the popup's
+  **Обновить токен** field so the extension reconnects PUSH. This
+  validates the new credentials against the agent-scoped HUD endpoint.
 - The local dashboard (`http://127.0.0.1:8787/dashboard`) requires HTTP Basic: username `admin` and the password from the private `admin-token` file beside the SQLite database. Login is independent from agent credentials. Dashboard administrators can read saved contexts and message history; do not assume either is visible to ordinary agents. The Chrome extension HUD reads only its own token-scoped `/api/v1/agents/hud` view, not the admin API.
 - If an agent is unavailable or its name has disappeared, check `list_agents`, manual deletion history, and its adapter. Do not impersonate another identity or claim delivery without evidence.
 - Do not start long-running processes, adapters, or autostart services without the user's request or permission. PUSH only **attempts** to wake agents; it does not guarantee continuous execution.

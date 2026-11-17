@@ -28,6 +28,7 @@ function createPopup({migrateFails=false,registered=false}={}) {
   };
   let onDOMContentLoaded;
   const messages=[];
+  const copied=[];
   let current=registered?{
     name:'Existing-Worker',role:'Developer',purpose:'Build apps',description:'3D + Python',
     active:true,agentId:'agent-uuid',bootstrapDone:true,
@@ -68,6 +69,10 @@ function createPopup({migrateFails=false,registered=false}={}) {
           if(migrateFails)return {ok:false,error:'Failed validation'};
           current={...EXISTING,active:true,bootstrapDone:true};
           return {ok:true,migrated:true,name:'Existing-Worker',agentId:'agent-uuid'};
+        case 'network:repeat-bootstrap':
+          return {ok:true,sent:true,agentId:current?.agentId};
+        case 'network:update-token':
+          return {ok:true,updated:true,agentId:current?.agentId};
         case 'network:start':
           current={...msg.profile,active:true,bootstrapDone:true};
           return {ok:true,created:true};
@@ -86,7 +91,9 @@ function createPopup({migrateFails=false,registered=false}={}) {
       if(name==='DOMContentLoaded')onDOMContentLoaded=callback;
     },
   };
-  vm.runInNewContext(code,{document,chrome,URL,console});
+  vm.runInNewContext(code,{document,chrome,URL,console,
+    navigator:{clipboard:{async writeText(value){copied.push(value);}}},
+  });
   const click=async id=>{
     const callback=el(id).listeners.click;
     assert.equal(typeof callback,'function','no click listener on '+id);
@@ -97,7 +104,7 @@ function createPopup({migrateFails=false,registered=false}={}) {
     el('name').listeners.input();
   };
   return {
-    el,click,setName,messages,
+    el,click,setName,messages,copied,
     async ready(){assert.ok(onDOMContentLoaded);await onDOMContentLoaded();}
   };
 }
@@ -206,4 +213,30 @@ test('admin token is not part of agent profile or migration message',async()=>{
   assert.equal('teams' in registration.profile,false);
   assert.equal(ui.messages.some(m=>m.type==='network:admin-set-teams'),false,
     'only explicit administrator Save can assign teams');
+});
+
+test('popup displays agent_id and offers safe reminder and rotated-token import',async()=>{
+  const ui=createPopup({registered:true});
+  await ui.ready();
+  assert.equal(ui.el('agent-id-row').hidden,false);
+  assert.equal(ui.el('agent-id').value,'agent-uuid');
+  assert.equal(ui.el('repeat-bootstrap').disabled,false);
+  await ui.click('copy-agent-id');
+  assert.deepEqual(ui.copied,['agent-uuid']);
+  await ui.click('repeat-bootstrap');
+  assert.equal(ui.messages.filter(m=>m.type==='network:repeat-bootstrap').length,1);
+  assert.match(ui.el('status').textContent,/повторно отправлено/);
+  ui.el('agent-token-new').value='UPDATED_PRIVATE_TOKEN';
+  await ui.click('agent-token-apply');
+  assert.equal(ui.messages.some(m=>m.type==='network:update-token' &&
+    m.token==='UPDATED_PRIVATE_TOKEN'),true);
+  assert.equal(ui.el('agent-token-new').value,'');
+  assert.match(ui.el('status').textContent,/обновлён/);
+});
+
+test('unbound popup hides agent ID and disables reminder',async()=>{
+  const ui=createPopup();await ui.ready();
+  assert.equal(ui.el('agent-id-row').hidden,true);
+  assert.equal(ui.el('agent-token-row').hidden,true);
+  assert.equal(ui.el('repeat-bootstrap').disabled,true);
 });

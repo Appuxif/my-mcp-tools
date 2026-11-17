@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 
+
 MESSAGE_TTL_SECONDS = 24 * 60 * 60
 MAX_CONTEXT_BYTES = 128 * 1024
 
@@ -725,8 +726,30 @@ class Store:
                 raise PermissionError("Invalid agent token")
             return row
 
+    def rotate_agent_token(self, agent_id: str) -> dict:
+        """Explicit admin action; old credentials immediately stop working.
+
+        Plaintext token is returned exactly once, never persisted or exposed
+        through normal dashboard snapshots.
+        """
+        with self.lock, self.db:
+            row = self._agent(agent_id)
+            secret = secrets.token_urlsafe(32)
+            self.db.execute(
+                "UPDATE agents SET token_hash=?, updated_at=? WHERE agent_id=?",
+                (digest(secret), now(), agent_id),
+            )
+            return {"agent_id": agent_id, "name": row["name"],
+                    "kind": row["kind"], "token": secret}
+
     def register(self, name: str, role: str, kind: str, purpose: str = "",
-                 description: str = "", agent_id: str = "", token: str = "") -> dict:
+                 description: str = "", agent_id: str = "", token: str = "",
+                 *, teams: list[str] | None = None) -> dict:
+        """Trusted internal registration. HTTP/MCP callers must authenticate first.
+
+        Team assignment on creation is atomic; reconnect never changes teams.
+        """
+        names = self._team_names(teams)
         name = name.strip()
         if not (1 <= len(name) <= 64) or not all(c.isalnum() or c in "-_." for c in name):
             raise ValueError("Agent name must be 1..64 letters, digits, '.', '-' or '_'")
@@ -739,6 +762,8 @@ class Store:
         with self.lock, self.db:
             existing = self.db.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
             if existing:
+                if teams is not None:
+                    raise ValueError("Team assignment is not allowed on reconnect")
                 if not agent_id or existing["agent_id"] != agent_id:
                     raise ValueError("Agent name already registered; use its id and token to reconnect")
                 self.verify(agent_id, token)
@@ -757,7 +782,7 @@ class Store:
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (agent_id, name, kind, role, purpose, description, digest(secret), stamp, stamp, stamp)
             )
-            self._set_teams(agent_id, ["default"])
+            self._set_teams(agent_id, names)
             return {"agent": self._public(self._agent(agent_id)), "token": secret, "created": True}
 
     def update_profile(self, agent_id: str, token: str, *, role: str = "",

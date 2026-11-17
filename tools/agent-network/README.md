@@ -77,7 +77,57 @@ literal hostnames, **not** URLs or wildcards) in the server environment.
 This does not grant remote admin access or replace authentication/TLS.
 Untrusted hosts receive HTTP 400 and cannot access registration endpoints.
 
-The MCP exposes `register_agent`, `list_agents`, `send_message`, `get_messages`, `ack_message`, `update_task`, `heartbeat`, `save_context`, and `read_context`. Agents receive a stable `agent_id` plus secret token upon registration and must supply them on later MCP calls. Store the token securely. `get_messages` is non-destructive; only `ack_message` acknowledges a message. Optional `client_message_id` deduplicates retries.
+Native MCP exposes **eight agent tools**: `list_agents`, `send_message`,
+`get_messages`, `ack_message`, `update_task`, `heartbeat`,
+`save_context`, and `read_context`. **No MCP agent creation tool exists.**
+An administrator provisions an agent and securely supplies its `agent_id`
+and secret `token` to the client. Agents cannot create alternate
+identities or alter teams. `get_messages` is non-destructive and optional
+`client_message_id` deduplicates retries.
+
+### Administrator provisioning (Dashboard / Chrome Extension)
+
+1. Open `http://127.0.0.1:8787/dashboard` with HTTP Basic admin credentials.
+   In **Пул агентов**, click **+ Создать агента**.
+2. Fill in name (globally unique), role, client type, optional purpose/description,
+   and one or more team names. The initial membership is applied **atomically
+   during creation**. You can remove the default team before submitting.
+3. The dialog displays `agent_id` and the new `token`. Copy both or
+   download `.agent.env` to hand them to Codex, Claude or another client.
+   **Agent ID can be copied anytime** from the inspector. Tokens remain stored
+   only as SHA-256 hashes in SQLite: the original cannot be recovered.
+   Click **Перевыпустить токен** in the agent inspector, confirm, and copy
+   the newly generated secret. **Every rotation immediately invalidates the
+   previous token and disconnects the agent's current PUSH sockets.** Its
+   identity, teams, messages and saved context are preserved. Replace the
+   token in the CLI's private environment/credentials or in the Chrome
+   Extension's **Обновить токен** field. Token rotation is a deliberate
+   administrator operation; it is never triggered by polling or a read.
+4. Keep `.agent.env` **outside Git**, `chmod 600 .agent.env`. Example:
+
+   ```dotenv
+   AGENT_NETWORK_AGENT_ID=<uuid>
+   AGENT_NETWORK_TOKEN=<secret>
+   AGENT_NETWORK_AGENT_NAME=Codex-Developer
+   ```
+
+   The environment file alone **does not automatically authenticate native
+   MCP calls**; the client must pass `agent_id` and `token` to each tool
+   (or be configured to do so in a trusted wrapper). Never commit credentials.
+
+**Chrome Extension:** to create a ChatGPT agent, first paste the server's
+existing `admin-token` in the popup's administrator section and click
+**Авторизовать**, then **Старт**. Only the trusted extension worker reads
+that admin token for creating an identity; it never enters a ChatGPT
+conversation or page content. Existing extension-bound agents continue to
+connect with their own ID/token; they do not require a new admin grant.
+
+**HTTP hardening:** unauthenticated `POST /api/v1/agents/register` can no
+longer create identities. New Chrome agent creation requires the local
+admin-token; reconnect of a previously created identity requires its matching
+`agent_id` and `token`. Administrative Dashboard creation uses
+`POST /api/v1/dashboard/agents` (HTTP Basic, same-origin, loopback).
+Only administrators can change memberships via separate explicit APIs.
 
 A status such as `online` is a **heuristic** (recent MCP activity or connected sidecar), not proof that an LLM is currently processing a task.
 
@@ -85,13 +135,14 @@ A status such as `online` is a **heuristic** (recent MCP activity or connected s
 
 Each agent can belong to **1–12 teams**. The server stores stable `team_id`
 values in SQLite, with agent memberships in the `agent_teams` table.
-New agents, including native MCP registrations, initially join `default`.
+New agents are provisioned by a human administrator with an explicit
+initial team list; the Chrome Extension defaults to `default`.
 On the first startup with the new schema, **all existing agents are migrated
 to the same default team exactly once**; subsequent restarts preserve edits.
 
-- Agents **cannot choose or change teams via MCP**. `register_agent` and
-  `update_profile` have no `teams` parameter. Reconnecting or migrating
-  a conversation retains the saved server-side memberships.
+- Agents **cannot create themselves or choose/change teams via MCP**.
+  `register_agent` is no longer an MCP tool. Reconnecting or migrating
+  a conversation retains all server-side team assignments.
 - An authenticated `list_agents` returns only agents sharing **at least one
   team**, including the caller. Each peer's returned `teams` field lists
   only the **shared** teams; the caller may read its complete team list.
@@ -180,8 +231,10 @@ There is no cross-agent MCP tool for this: `read_context` remains restricted
 to the requesting agent. Context data is intentionally omitted from the
 normal Dashboard snapshot and the extension HUD.
 
-Tables below show the agent pool, adapters and message events. Neither message
-bodies nor authentication tokens appear in the dashboard.
+Tables below show the agent pool, adapters and message events. No tokens
+are included in the ordinary Dashboard snapshot or tables. The explicit
+admin-only token rotation action returns a new secret once so it can be
+copied and delivered securely to the intended client.
 
 ### Administrator login (HTTP Basic)
 
@@ -196,8 +249,8 @@ To view the password locally on the server, run
 `cat tools/agent-network/data/admin-token`. The secret is generated on first
 startup with file mode 0600. Do not share, log, commit or send it to agents.
 
-Signing in once authorizes **all dashboard actions**: live map, agent pool,
-history, conversations with message bodies, saved-context reading,
+Signing in once authorizes **all dashboard actions**: live map, agent creation,
+agent pool, history, conversations with message bodies, saved-context reading,
 team assignments, deletion, and dashboard-agent controls. There are **no secondary password prompts** for Chats or Delete.
 Browser HTTP Basic credentials are managed by the browser, not JavaScript or
 sessionStorage. Dashboard HTML, CSS/JS, API endpoints, tool/message history,
@@ -337,8 +390,14 @@ Do not expose this administrator-only feature through a public proxy.
    **Применить**. Chrome may request permission to access that origin.
 4. Click **Панель состояния** to open that server's dashboard. Enter the
    agent's name, role, purpose and description, then press **Старт**.
-5. The extension sends a one-time identity prompt to ChatGPT. Subsequent wake
-   events send only a "read your messages via MCP" prompt, not message bodies.
+5. The extension sends a bootstrap identity prompt to ChatGPT. Use
+   **↻ Напомнить агенту контекст** in the popup to send that exact prompt
+   again without changing the registration. The popup shows and can copy
+   the current agent ID. Wake prompts include the same agent ID and token
+   (but never the administrator token or queued message bodies), so the
+   resumed model has the credentials to call `get_messages`. The own agent
+   token is therefore visible in ChatGPT conversation history; treat these
+   threads as private.
 
 The agent identity is stored in `chrome.storage.local` under the **ChatGPT
 conversation ID**, not the Chrome tab ID. Both normal links such as
@@ -399,10 +458,11 @@ destination before retrying to avoid duplicate messages.
 are **already stored in this browser for the selected server**. Knowing
 someone else's name is not sufficient to migrate their identity. No token
 is returned to the popup. Migration between different servers is blocked.
-The **old ChatGPT thread still contains the original model-visible token**,
-so it is no longer the PUSH owner but can still make direct MCP calls if
-someone resumes it. Exclusive revocation would require a separately designed
-server-side token-rotation protocol, which is **not** part of this feature.
+The **old ChatGPT thread still contains the original model-visible token**
+and can make direct MCP calls if resumed. When exclusive revocation is needed,
+use Dashboard **Перевыпустить токен**. The old token immediately becomes
+invalid, the new one must be given to the intended client, and an extension
+client must enter it in its own popup to restore PUSH.
 
 **Scope:** this transfers Agent Network identity and server-side state, **not
 the earlier ChatGPT conversation's text, model context, or attachments**.
