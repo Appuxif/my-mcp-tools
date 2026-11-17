@@ -248,30 +248,27 @@ class Store:
             (first,second)
         ).fetchone() is not None
 
-    def _check_shared(self, sender: str, recipient: str) -> None:
-        if not self._shared(sender,recipient):
-            # Do not reveal whether an invisible agent actually exists.
-            raise ValueError("Recipient agent not found")
-
-    def _ensure_dashboard_team(self, sender_id: str, recipient_id: str) -> None:
-        """Admin Dashboard send: grant its operator a recipient's team.
-
-        Called only from the Basic-authenticated Dashboard HTTP send route.
-        Normal MCP sends must never call this. Adding the operator (not the
-        recipient) preserves the same team-gated inbox/ACK/PUSH semantics.
-        """
-        if self._shared(sender_id, recipient_id):
+    def _check_shared(self, sender: str, recipient: str,
+                      *, source: str = "mcp") -> None:
+        if self._shared(sender, recipient):
             return
-        team = self.db.execute(
-            "SELECT team_id FROM agent_teams WHERE agent_id=? ORDER BY team_id LIMIT 1",
-            (recipient_id,),
-        ).fetchone()
-        if team is None:
-            raise ValueError("Recipient agent has no assigned team")
-        self.db.execute(
-            "INSERT OR IGNORE INTO agent_teams(agent_id,team_id) VALUES(?,?)",
-            (sender_id, team["team_id"]),
-        )
+        if source == "dashboard":
+            # The Basic-authenticated administrator can already see all agents
+            # and their teams. Explain the mismatch; never mutate memberships.
+            recipient_agent = self._agent(recipient)
+            team_names = [team["name"] for team in self._teams(recipient)]
+            if team_names:
+                detail = "Команды получателя: " + ", ".join(team_names) + ". "
+            else:
+                detail = "Получателю ещё не назначена команда. "
+            raise ValueError(
+                f"Получатель «{recipient_agent['name']}» не найден в командах "
+                f"Dashboard-агента. {detail}"
+                "Добавьте Dashboard-агента в одну из команд получателя через "
+                "инспектор, затем повторите отправку."
+            )
+        # Ordinary MCP clients must not learn whether an invisible peer exists.
+        raise ValueError("Recipient agent not found")
 
     def maintain_storage(self) -> dict:
         """Return unused SQLite pages to the OS without compacting every sweep."""
@@ -841,14 +838,10 @@ class Store:
                     if (existing["recipient_id"] != recipient["agent_id"] or
                         existing["body"] != body or existing["task_id"] != task_id):
                         raise ValueError("Idempotency key reused with different message")
-                    if source == "dashboard":
-                        self._ensure_dashboard_team(sender_id, recipient["agent_id"])
-                    self._check_shared(sender_id, recipient["agent_id"])
+                    self._check_shared(sender_id, recipient["agent_id"], source=source)
                     return {"message_id": existing["message_id"], "duplicate": True}
             recipient = self.resolve(to)
-            if source == "dashboard":
-                self._ensure_dashboard_team(sender_id, recipient["agent_id"])
-            self._check_shared(sender_id, recipient["agent_id"])
+            self._check_shared(sender_id, recipient["agent_id"], source=source)
             message_id = opaque_id()
             self.db.execute(
                 "INSERT INTO messages(message_id,sender_id,recipient_id,body,task_id,client_message_id,created_at) "

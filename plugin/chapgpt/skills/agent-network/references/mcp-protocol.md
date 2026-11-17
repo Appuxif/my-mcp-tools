@@ -132,12 +132,14 @@ Markdown preview (default) and raw-text mode. All content is treated as
 untrusted data; links are restricted to HTTPS/HTTP and mailto, and raw HTML
 is not executed. Copy returns the original snapshot.
 
-The administrator's Dashboard operator can send to an agent in a disjoint
-team: the Basic-authenticated Dashboard HTTP send endpoint first **adds the
-Dashboard operator** to one team of the recipient, then uses the ordinary
-team-restricted message queue. This is a persistent membership change
-visible in the inspector and is **not available through native MCP**. Agents
-cannot simply claim to be the Dashboard operator to cross team boundaries.
+The Dashboard operator is subject to the same team-restricted messaging
+rules as every other agent. On a cross-team send attempt, the
+Basic-authenticated Dashboard HTTP endpoint returns HTTP 400 with a clear
+explanation naming the recipient's team(s) and instructing the administrator
+to **explicitly assign the Dashboard agent to one of those teams** in the
+inspector before retrying. Sending never changes memberships by itself.
+Ordinary MCP agents still receive only the generic `Recipient agent not found`
+error and cannot enumerate hidden peers across team boundaries.
 
 Arrow age labels are shown only for interactions within the past 10 minutes. An arrow without an age label does **not** mean the connection is inactive or absent. Never expose another agent's secrets or unrelated private message contents in reports or external tools.
 

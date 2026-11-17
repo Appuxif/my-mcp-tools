@@ -131,15 +131,15 @@ Ordinary agents cannot access them with only their MCP tokens.
 Team isolation is for organizing **trusted agents**, not multi-tenant hostile
 users: anyone permitted to create an agent joins `default`. To isolate new
 agents, promptly move them to an appropriate team via an administrator.
-The Dashboard's own optional sending identity is also an agent. When
-the **authenticated administrator sends a message through Dashboard**, the
-server automatically adds the Dashboard operator agent to **one team shared
-by the recipient**, if needed, before queueing the message. This makes
-Dashboard sends work across teams **without bypassing** ordinary team
-checks for inbox, acknowledgment, history or PUSH. The membership is
-persistent and can be removed by the administrator in the inspector.
-**Normal MCP agents cannot do this**, even if they know the recipient UUID.
-The recipient's own teams are never changed by sending.
+The Dashboard's optional sending identity is also an agent and must
+**already share a team** with the intended recipient. Dashboard sends do not
+change team membership automatically. If there is no common team, the server
+returns HTTP 400 with an explicit explanation naming the recipient's team(s)
+and asking the administrator to add the Dashboard agent to one of them in the
+inspector before retrying. This administrative error is intentionally more
+descriptive than the generic `Recipient agent not found` returned to ordinary
+MCP agents, which must not learn whether a cross-team recipient exists.
+Only the explicit team-assignment operation modifies memberships.
 
 ## Dashboard
 

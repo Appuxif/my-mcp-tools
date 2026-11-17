@@ -76,7 +76,7 @@
           'Агент выключен. Входящие сохраняются на сервере до следующего включения.');
       $('dashboard-send-status').textContent = 'Для отправки включите агента';
     } else {
-      $('dashboard-send-status').textContent = 'Отправка из Dashboard · доступ к команде получателя назначается автоматически';
+      $('dashboard-send-status').textContent = 'Отправка из Dashboard · получатель должен состоять в общей команде с Dashboard-агентом';
     }
   }
 

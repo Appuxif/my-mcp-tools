@@ -59,11 +59,13 @@ agent's saved context. For exact tool signatures see
   inspector or the Chrome extension popup configured with the server's
   existing `admin-token`. Do not ask to see the admin token, put it in a
   prompt/context, or pass it to an agent.
-- A human-operated **Dashboard sender** can message an agent in another
-  team: the Basic-authenticated Dashboard send endpoint automatically
-  grants its **own dashboard operator agent** membership in a team of the
-  recipient. The membership persists, and the operator can then receive
-  replies normally. **Native MCP agents never receive this privilege.**
+- A human-operated **Dashboard sender** is subject to the same team
+  isolation: it can send only to agents sharing a team with its Dashboard
+  operator identity. The Dashboard returns a descriptive error on mismatch,
+  including the recipient's team(s). The human administrator must explicitly
+  add the Dashboard agent to a team of the recipient via the inspector, then
+  retry. Sending never changes team memberships automatically. Native MCP
+  clients still receive a generic error without revealing hidden peers.
 
 ## Persistent work context (rare, user-directed tools)
 
