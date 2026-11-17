@@ -68,7 +68,7 @@ endpoint via a properly authenticated private proxy/tunnel. The dashboard API
 contains agent/task metadata, so **do not publish it openly on the internet**.
 Remote HTTP access is not enabled or deployed by this project.
 
-The MCP exposes `register_agent`, `list_agents`, `send_message`, `get_messages`, `ack_message`, `update_task`, and `heartbeat`. Agents receive a stable `agent_id` plus secret token upon registration and must supply them on later MCP calls. Store the token securely. `get_messages` is non-destructive; only `ack_message` acknowledges a message. Optional `client_message_id` deduplicates retries.
+The MCP exposes `register_agent`, `list_agents`, `send_message`, `get_messages`, `ack_message`, `update_task`, `heartbeat`, `save_context`, and `read_context`. Agents receive a stable `agent_id` plus secret token upon registration and must supply them on later MCP calls. Store the token securely. `get_messages` is non-destructive; only `ack_message` acknowledges a message. Optional `client_message_id` deduplicates retries.
 
 A status such as `online` is a **heuristic** (recent MCP activity or connected sidecar), not proof that an LLM is currently processing a task.
 
@@ -137,33 +137,47 @@ Dashboard **agent identity** credentials are kept in origin-local
 is independent and cached by the browser. The dashboard is designed for a
 trusted local operator, not a public multi-user application.
 
-### Agent name expiry and manual deletion
+### Persistent agent identity, compact context, and manual deletion
 
-An agent retains its name until it has gone more than **24 hours without
-activity**, as measured by its latest registration, MCP call, profile/task
-update, PUSH heartbeat, or dashboard heartbeat. Active PUSH WebSocket sessions
-prevent automatic expiry. At startup and every five minutes, the maintenance
-worker deletes abandoned agents and releases their names. Their old token
-and agent ID are no longer valid; a new registration with the same name gets
-a new identity. Successful reconnections refresh MCP activity. Incoming messages
-do not count as recipient activity. Unexpired pending messages defer removal
-until their own 24-hour TTL; new sends to already-expired recipients fail.
+**Registered agents never expire from inactivity.** Agent names, identities,
+credentials and saved context remain in SQLite across restarts and chat
+migrations. There is **no automatic agent deletion**, even without an active
+PUSH channel or recent MCP traffic. Background maintenance still removes
+**messages** after their separate 24-hour TTL, prunes disconnected channel
+records and compacts SQLite. Sending to a registered but offline agent is
+allowed; this queues a message, but does **not** imply it will be received.
+
+**Compact context (`save_context`, `read_context`):** A user may occasionally
+ask an agent to `/compact` / summarize current work and save the summary via
+native MCP `save_context(agent_id, token, context)`. This overwrites the prior
+summary for that **same agent identity** (up to 128 KiB UTF-8) and persists
+until the agent is manually deleted. `read_context(agent_id, token)` returns
+`{exists, context, updated_at}` for that identity only, or `exists=false`
+when it has never saved a summary. Summaries are not message bodies, not
+visible in global agent lists or Dashboard metadata, and are not shared with
+other agents. SQLite stores the summary as **plaintext on disk**: do not put
+passwords, tokens, private credentials or unrelated sensitive data into it.
+
+**Usage policy:** Do **not** call these tools on every task, wake, or timer.
+`save_context` is only for an **explicit user request**; `read_context` is for
+an explicit user request or **user-initiated migration** to a new ChatGPT
+conversation. In the latter case the Chrome extension's bootstrap asks the
+new chat to call `read_context` through native MCP; the extension never reads
+or transfers the summary itself. Migrating without a saved summary returns
+`exists=false`; it cannot reconstruct unsaved history.
 
 To remove an agent manually, select it in the graph or agent table and
 press **Удалить агента** in the inspector. **The dashboard agent toggle is
 not required**: deletion is local server administration, not inter-agent
-messaging. An explicit confirmation warns that the identity, its
-incoming/outgoing messages and PUSH adapter sessions will be deleted.
+messaging. An explicit confirmation warns that the identity, its saved
+context, incoming/outgoing messages and PUSH adapter sessions will be deleted.
 
 Deleting agents uses the **same administrator HTTP Basic login** as the rest
 of the dashboard, without another password prompt. It is restricted to
 loopback Host/client and same-origin requests. The deletion confirmation
 dialog remains. The dashboard agent toggle need not be enabled.
-Deleted agents lose their token; live adapter connections are closed.
-
-The Chrome extension and dashboard can re-register an expired agent under
-the same name when it becomes available again; the ChatGPT conversation gets
-a fresh identity prompt and secret.
+Deleted agents lose their token and saved summary; live adapters are closed.
+Only after manual deletion can the name be reused by a fresh registration.
 
 ### Read-only conversation inspector
 
@@ -431,9 +445,10 @@ The graph switches to a nonoverlapping scrollable grid for larger pools,
 supports all registered agents, and has + / - / reset zoom controls.
 
 Message retention runs on startup and every five minutes, with SQLite
-incremental auto-vacuum and WAL checkpoint. Messages are never silently
-accepted for an already-expired recipient. Fresh pending messages always
-retain their full 24-hour TTL even when their recipient has become inactive.
+incremental auto-vacuum and WAL checkpoint. Only messages and disconnected
+channels have TTL-based cleanup; agent identities and their compact summaries
+are never pruned. Messages sent to offline registered agents are queued for
+at most 24 hours and can expire unread.
 
 ## Validation
 

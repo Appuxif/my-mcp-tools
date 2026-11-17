@@ -57,6 +57,7 @@ class McpRoundTripTests(unittest.TestCase):
                 for expected in (
                     "register_agent", "list_agents", "send_message", "get_messages",
                     "ack_message", "update_task", "heartbeat",
+                    "save_context", "read_context",
                 ):
                     self.assertIn(expected, names)
 
@@ -69,6 +70,19 @@ class McpRoundTripTests(unittest.TestCase):
                 b_auth = {"agent_id": bob["agent"]["agent_id"],
                           "token": bob["token"]}
                 self.assertTrue(tool("heartbeat", a_auth, 5)["ok"])
+
+                self.assertEqual(tool("read_context", a_auth, 13), {
+                    "exists": False, "context": "", "updated_at": None,
+                })
+                context = "# Checkpoint\nImplement durable context\nNext: validation"
+                saved = tool("save_context", {**a_auth, "context": context}, 14)
+                self.assertTrue(saved["saved"])
+                self.assertEqual(saved["bytes"], len(context.encode("utf-8")))
+                restored = tool("read_context", a_auth, 15)
+                self.assertTrue(restored["exists"])
+                self.assertEqual(restored["context"], context)
+                self.assertEqual(restored["updated_at"], saved["updated_at"])
+                self.assertFalse(tool("read_context", b_auth, 16)["exists"])
 
                 agents = tool("list_agents", a_auth, 6)
                 self.assertEqual({x["name"] for x in agents}, {"test-alice", "test-bob"})

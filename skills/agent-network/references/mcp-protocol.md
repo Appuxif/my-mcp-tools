@@ -2,7 +2,7 @@
 
 Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## Seven tools
+## Nine tools
 
 | Tool | Arguments | Result |
 |---|---|---|
@@ -13,6 +13,8 @@ Verified against `tools/agent-network/agent_network/server.py` and `store.py`. I
 | `ack_message` | `agent_id`, `token`, `message_id` | `acknowledged` status; only the intended recipient can acknowledge the message. |
 | `update_task` | `agent_id`, `token`, `task`, `status` | Updated agent entry. Valid statuses: `idle`, `working`, `blocked`, `done`, `failed`. |
 | `heartbeat` | `agent_id`, `token` | `{"ok": true}`; updates MCP activity, not actual process or UI state. |
+| `save_context` | `agent_id`, `token`, `context` | Overwrites the caller's persistent compact summary (max 128 KiB UTF-8). `saved`, `updated_at`, `bytes`. Only on **explicit user request**. |
+| `read_context` | `agent_id`, `token` | Returns `exists`, `context`, `updated_at` for that agent only. On **user request or user-initiated migration**; not routine polling. |
 
 Schematic My MCP Tools invocation:
 
@@ -31,7 +33,21 @@ An agent connected directly to the native MCP calls `get_messages` without going
 - Registration requires `name` (unique) and `role`. Use `kind=chatgpt` for a ChatGPT extension agent, `kind=codex` for Codex, or `other` / supported `claude` for other agents. `kind=dashboard` is intended for the HTTP dashboard: a plain `register_agent` call does not enable dashboard mode.
 - To reconnect to an existing identity, supply the **same** `name`, `agent_id`, and `token`. Do not try to take over another registration simply because its name exists.
 - `token` is an agent secret. Do not send it to peers, publish it, or commit it to Git. The ChatGPT extension's bootstrap prompt includes the token in the conversation history; this local MVP does **not** provide production-grade secret isolation.
-- If an identity was manually removed or expired after 24 hours of inactivity, the old `agent_id` and `token` no longer work. Registration under an available name creates a new UUID and token.
+- An identity is deleted **only manually** by an authorized dashboard user; inactivity never expires it. After manual deletion its old `agent_id`, `token`, and saved summary are invalidated; the freed name can be registered again.
+
+## Compact context and chat migration
+
+When the user asks for a `/compact`-like checkpoint, write a self-contained
+summary and save it through `save_context` with the existing agent credentials.
+One summary per agent is stored in SQLite and each save **replaces** the last.
+It survives shutdown, inactivity, and switching ChatGPT conversations. The
+Chrome extension's migration bootstrap instructs the new ChatGPT session to
+call `read_context(agent_id, token)` once, using the same stable identity.
+If `exists=false`, the previous conversation was never compacted; no text can
+be recovered automatically. Both tools require the agent's own credentials.
+Never save tokens or passwords in the context. Do not call either tool
+periodically or after every task; `save_context` requires an explicit user
+request, while `read_context` also applies to a user-initiated migration.
 
 ## Delivery, ACK, and deduplication
 
@@ -60,11 +76,10 @@ An agent connected directly to the native MCP calls `get_messages` without going
 | `last_wake_at`, `last_wake_result` | Time and result of a PUSH attempt; not proof of execution. |
 | Dashboard `online` | Separate rule: toggle enabled and heartbeat within ~35 seconds. |
 
-Inbound messages do not update the recipient's activity; reconnecting with
-valid credentials does. Expired recipients reject new sends. If a recipient
-has pending unexpired messages, deletion is deferred until those messages
-have enjoyed their entire 24-hour TTL, even if the recipient remains idle.
-A connected PUSH adapter also protects a registered identity from cleanup.
+Agent identity has **no inactivity TTL**. Incoming messages do not update
+recipient presence, but an offline registered recipient may still receive new
+pending messages. Agents retain their names and compact summaries until manual
+administrator deletion, even when no PUSH adapter is connected.
 
 **Message TTL:** **24 hours from creation** regardless of whether the message is `pending` or `acknowledged`. Cleanup runs on server startup and approximately every five minutes. Inbox reads exclude expired items immediately. This is not long-term storage or guaranteed delivery.
 

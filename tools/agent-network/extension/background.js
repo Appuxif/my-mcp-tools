@@ -483,8 +483,11 @@ function bootstrapPrompt(record, migrated=false) {
     'token: ' + record.token,
     'Keep the token private. Use list_agents/get_messages/send_message/ack_message.',
     'Call get_messages now to check for pending work. Wake signals will arrive through this chat.',
+    'Use save_context only when the user explicitly asks you to compact/save this chat; never automatically.',
     ...(migrated ? [
       'This is a new ChatGPT conversation. Prior ChatGPT conversation history was not copied.',
+      'Call native MCP read_context(agent_id, token) now to restore the saved compact summary from the prior conversation.',
+      'Continue from that saved context when it exists. If no summary was saved, do not invent one.',
       'Continue using the same Agent Network ID, profile, pending inbox and task state.'
     ] : []),
   ].join('\n');

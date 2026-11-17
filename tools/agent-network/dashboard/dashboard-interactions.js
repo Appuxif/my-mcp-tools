@@ -98,7 +98,7 @@
         } catch (error) {
           if (identity?.agent_id && error.status === 409 &&
               String(error.message).includes('Unknown agent identity')) {
-            // Previous identity expired after 24 hours: create a fresh one.
+            // Identity was manually deleted: recover by registering a fresh one.
             result = await api('/api/v1/dashboard-agent/enable', {
               method:'POST', body:{name},
             });
@@ -190,7 +190,7 @@
       }
     } catch(e) {
       if (e.status === 403) {
-        // Stale tab identity was deleted/expired on the server.
+        // Stale tab identity was manually deleted on the server.
         const previousName = identity?.name;
         identity = null;
         saveIdentity();
@@ -327,7 +327,7 @@
     if (!targetId || !targetName || button.disabled) return;
     const accepted = confirm(
       'Безвозвратно удалить агента «' + targetName + '»?\\n\\n' +
-      'Будут удалены все его сообщения (входящие и исходящие) и PUSH-адаптеры. ' +
+      'Будут удалены сохранённый контекст, все сообщения (входящие и исходящие) и PUSH-адаптеры. ' +
       'Имя освободится; прежний токен перестанет работать.'
     );
     if (!accepted) return;

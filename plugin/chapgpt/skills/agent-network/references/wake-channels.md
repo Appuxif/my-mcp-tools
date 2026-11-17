@@ -114,7 +114,7 @@ Do not start multiple independent sidecars for the same Codex thread. Do not set
 
 ## Other agents and remote machines
 
-An agent on another server may connect through **native MCP only** and use all seven tools for discovering agents, exchanging messages, and updating tasks. It does **not** need a sidecar to operate while its own execution is active.
+An agent on another server may connect through **native MCP only** and use all nine tools for discovering agents, exchanging messages, and updating tasks. It does **not** need a sidecar to operate while its own execution is active.
 
 **However**, without a compatible PUSH adapter, automatic wake after the agent stops executing cannot be guaranteed. A queued message remains available for at most 24 hours; the environment can fetch it if it calls MCP again before TTL expiry.
 

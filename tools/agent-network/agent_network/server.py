@@ -113,9 +113,7 @@ class Broker:
     def run_maintenance(self):
         self.store.prune_messages()
         self.store.prune_channels()
-        self.store.prune_agents(
-            exclude_ids={owner for owner, _, _ in list(self.connections.values())}
-        )
+        # Agent identities and compact context are deleted only by the admin.
         self.store.maintain_storage()
         self.last_maintenance = time.monotonic()
 
@@ -252,8 +250,12 @@ def create_app(config: Config | None = None) -> FastAPI:
             "Messages are delivered over native MCP. Register a stable agent identity "
             "once, retain its per-agent token, and use that identity in further calls. "
             "Use get_messages to read pending messages and ack_message only after "
-            "you have received them. Do not continuously poll while idle; optional "
-            "local wake adapters can signal inactive clients."
+            "you have received them. Only on explicit user request, use save_context "
+            "to store a compact summary. Use read_context on user request or after "
+            "the user migrates this agent to a new chat; do not poll these tools. "
+            "Agent identities and summaries persist until manual deletion. "
+            "Do not continuously poll while idle; optional local wake adapters "
+            "can signal inactive clients."
         ),
     )
 
@@ -323,6 +325,22 @@ def create_app(config: Config | None = None) -> FastAPI:
     def update_task(agent_id: str, token: str, task: str, status: str) -> dict:
         """Set current task and status: idle, working, blocked, done or failed."""
         return store.update_task(agent_id, token, task, status)
+
+    @mcp.tool()
+    @audit
+    def save_context(agent_id: str, token: str, context: str) -> dict:
+        """Overwrite this agent's durable compact summary (max 128 KiB). Call ONLY
+        after an explicit user request to /compact or save work; never automatically
+        or on a timer. Not for secrets or routine message exchange."""
+        return store.save_context(agent_id, token, context)
+
+    @mcp.tool()
+    @audit
+    def read_context(agent_id: str, token: str) -> dict:
+        """Read this agent's stored summary (or exists=false). Use ONLY on an
+        explicit user request or user-initiated migration to a new chat; do not
+        poll or reread for each task/wake. Context is private to this agent."""
+        return store.read_context(agent_id, token)
 
     @mcp.tool()
     @audit

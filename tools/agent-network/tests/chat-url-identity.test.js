@@ -338,6 +338,8 @@ test('confirmed migration moves the SAME agent to a different existing conversat
   const newPrompt=h.events.filter(e=>e.type==='agent:send').at(-1).body;
   assert.match(newPrompt.text,/EXISTING Agent Network identity/);
   assert.match(newPrompt.text,/Prior ChatGPT conversation history was not copied/);
+  assert.match(newPrompt.text,/read_context\(agent_id, token\)/);
+  assert.match(newPrompt.text,/Use save_context only when the user explicitly asks/);
   assert.match(newPrompt.text,/agent_id: uuid-identity-1/);
   assert.match(newPrompt.text,/token: PRIVATE_AGENT_SECRET/);
   assert.equal(newPrompt.allowNewChat,false);

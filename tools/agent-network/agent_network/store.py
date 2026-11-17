@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 MESSAGE_TTL_SECONDS = 24 * 60 * 60
+MAX_CONTEXT_BYTES = 128 * 1024
 
 
 def now() -> float:
@@ -105,6 +106,11 @@ class Store:
                     last_wake_result TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS channels_agent ON channels(agent_id, connected);
+                CREATE TABLE IF NOT EXISTS agent_contexts(
+                    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    context TEXT NOT NULL,
+                    updated_at REAL NOT NULL
+                );
             """)
             self.db.execute("PRAGMA foreign_keys=ON")
             # Compatible migration for existing agent-network.db files.
@@ -141,26 +147,6 @@ class Store:
             self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             return {"free_pages_before": free}
 
-    @staticmethod
-    def _last_activity(agent: sqlite3.Row) -> float:
-        return max(agent["created_at"], agent["updated_at"],
-                   agent["last_mcp_activity"] or 0,
-                   agent["last_channel_activity"] or 0,
-                   agent["last_dashboard_seen"] or 0)
-
-    def _has_live_channel(self, agent_id: str) -> bool:
-        return self.db.execute(
-            "SELECT 1 FROM channels WHERE agent_id=? AND connected=1 LIMIT 1",
-            (agent_id,),
-        ).fetchone() is not None
-
-    def _has_pending_messages(self, agent_id: str, at: float) -> bool:
-        return self.db.execute(
-            "SELECT 1 FROM messages WHERE recipient_id=? AND status='pending' "
-            "AND created_at>? LIMIT 1",
-            (agent_id, at - MESSAGE_TTL_SECONDS),
-        ).fetchone() is not None
-
     def prune_messages(self, *, at: float | None = None) -> dict:
         """Delete ALL messages older than 24 hours, independent of status.
 
@@ -189,46 +175,16 @@ class Store:
             channels = self.db.execute(
                 "DELETE FROM channels WHERE agent_id=?", (agent_id,)
             ).rowcount
+            contexts = self.db.execute(
+                "DELETE FROM agent_contexts WHERE agent_id=?", (agent_id,)
+            ).rowcount
             # Keep aggregate tool telemetry but unlink it from deleted identities.
             self.db.execute("UPDATE tool_calls SET agent_id=NULL WHERE agent_id=?",
                             (agent_id,))
             self.db.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
             return {"agent_id": agent_id, "name": agent["name"],
-                    "deleted_messages": messages, "deleted_channels": channels}
-
-    def prune_agents(self, *, at: float | None = None,
-                     exclude_ids: set[str] | None = None) -> list[dict]:
-        """Expire identities with no activity for >24h, freeing their names.
-
-        Live sidecars supplied by Broker are excluded even if no ping has been
-        observed recently. A recent inbound message does not reset recipient
-        activity, so an abandoned identity can still expire.
-        """
-        cutoff = (now() if at is None else at) - MESSAGE_TTL_SECONDS
-        excluded = exclude_ids or set()
-        deleted = []
-        with self.lock, self.db:
-            rows = self.db.execute(
-                """SELECT agent_id FROM agents
-                   WHERE max(created_at, updated_at,
-                             coalesce(last_mcp_activity,0),
-                             coalesce(last_channel_activity,0),
-                             coalesce(last_dashboard_seen,0)) < ?
-                   ORDER BY agent_id""",
-                (cutoff,)
-            ).fetchall()
-            for row in rows:
-                agent_id = row["agent_id"]
-                if agent_id in excluded:
-                    continue
-                if self._has_live_channel(agent_id):
-                    continue
-                # Preserve the full 24-hour TTL of previously accepted messages.
-                # New messages to already-expired recipients are rejected.
-                if self._has_pending_messages(agent_id, now() if at is None else at):
-                    continue
-                deleted.append(self.delete_agent(agent_id))
-        return deleted
+                    "deleted_messages": messages, "deleted_channels": channels,
+                    "deleted_context": bool(contexts)}
 
     def prune_channels(self, *, at: float | None = None) -> int:
         """Discard old disconnected wake-channel sessions (not registered agents)."""
@@ -716,12 +672,6 @@ class Store:
                         raise ValueError("Idempotency key reused with different message")
                     return {"message_id": existing["message_id"], "duplicate": True}
             recipient = self.resolve(to)
-            # An expired identity must not accept messages that maintenance
-            # will immediately destroy. This check is atomic with the insert.
-            stamp = now()
-            if (self._last_activity(recipient) <= stamp - MESSAGE_TTL_SECONDS
-                    and not self._has_live_channel(recipient["agent_id"])):
-                raise ValueError("Recipient agent has expired; refresh the agent list")
             message_id = opaque_id()
             self.db.execute(
                 "INSERT INTO messages(message_id,sender_id,recipient_id,body,task_id,client_message_id,created_at) "
@@ -760,6 +710,37 @@ class Store:
                     "UPDATE messages SET status='acknowledged', acknowledged_at=? WHERE message_id=?",
                     (now(), message_id))
             return {"message_id": message_id, "status": "acknowledged"}
+
+    def save_context(self, agent_id: str, token: str, context: str) -> dict:
+        """Replace this agent's long-lived compact summary, never its credentials."""
+        self.touch_mcp(agent_id, token)
+        if not isinstance(context, str) or not context.strip():
+            raise ValueError("Context must be nonempty text")
+        size = len(context.encode("utf-8"))
+        if size > MAX_CONTEXT_BYTES:
+            raise ValueError(f"Context exceeds {MAX_CONTEXT_BYTES} bytes")
+        with self.lock, self.db:
+            stamp = now()
+            self.db.execute(
+                "INSERT INTO agent_contexts(agent_id,context,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET context=excluded.context, "
+                "updated_at=excluded.updated_at",
+                (agent_id, context, stamp),
+            )
+            return {"saved": True, "updated_at": stamp, "bytes": size}
+
+    def read_context(self, agent_id: str, token: str) -> dict:
+        """Read only the caller's durable summary; no message TTL applies."""
+        self.touch_mcp(agent_id, token)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT context,updated_at FROM agent_contexts WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                return {"exists": False, "context": "", "updated_at": None}
+            return {"exists": True, "context": row["context"],
+                    "updated_at": row["updated_at"]}
 
     def update_task(self, agent_id: str, token: str, task: str, status: str) -> dict:
         self.touch_mcp(agent_id, token)

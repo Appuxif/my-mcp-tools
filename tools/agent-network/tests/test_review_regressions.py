@@ -40,51 +40,42 @@ class StoreSafetyTests(unittest.TestCase):
                 "WHERE agent_id=?", (old, old, old, agent_id)
             )
 
-    def test_expired_recipient_cannot_acknowledge_new_task(self):
+    def test_inactive_recipient_can_receive_new_task(self):
         self.age(self.b, seconds=MESSAGE_TTL_SECONDS + 5)
-        with self.assertRaisesRegex(ValueError, "expired"):
-            self.store.send(
-                self.a["agent"]["agent_id"], self.a["token"], "recipient",
-                "Never pretend this was delivered",
-            )
-        self.assertEqual(
-            self.store.db.execute("SELECT count(*) FROM messages").fetchone()[0], 0
+        sent = self.store.send(
+            self.a["agent"]["agent_id"], self.a["token"], "recipient",
+            "A delayed task can still be queued",
         )
-        self.assertEqual(
-            [r["name"] for r in self.store.prune_agents()], ["recipient"]
-        )
-        fresh = self.store.register("recipient", "new person", "other")
-        self.assertNotEqual(fresh["agent"]["agent_id"], self.b["agent"]["agent_id"])
+        self.assertFalse(sent["duplicate"])
+        self.assertEqual(len(self.store.inbox(
+            self.b["agent"]["agent_id"], self.b["token"])), 1)
+        self.assertEqual(len(self.store.agents()), 2)
 
-    def test_pending_message_survives_recipient_inactivity_cleanup(self):
+    def test_pending_message_expires_without_deleting_recipient(self):
         message = self.store.send(
-            self.a["agent"]["agent_id"], self.a["token"], "recipient", "Fresh task"
+            self.a["agent"]["agent_id"], self.a["token"],
+            "recipient", "Fresh task",
         )
         self.age(self.b, seconds=MESSAGE_TTL_SECONDS + 10)
-        self.assertEqual(self.store.prune_agents(), [])
-        self.assertEqual(
-            self.store.db.execute(
-                "SELECT status FROM messages WHERE message_id=?",
-                (message["message_id"],)
-            ).fetchone()[0], "pending"
-        )
-        # Once its own TTL ends, the recipient may finally be pruned.
+        self.assertEqual(self.store.db.execute(
+            "SELECT status FROM messages WHERE message_id=?",
+            (message["message_id"],)
+        ).fetchone()[0], "pending")
         future = time.time() + MESSAGE_TTL_SECONDS + 1
         self.assertEqual(self.store.prune_messages(at=future)["expired_messages"], 1)
-        self.assertEqual(len(self.store.prune_agents(at=future)), 2)
+        self.assertEqual(len(self.store.agents()), 2)
 
-    def test_reconnect_refreshes_activity(self):
-        self.age(self.b, seconds=MESSAGE_TTL_SECONDS - 10)
+    def test_reconnect_refreshes_activity_without_expiring_identity(self):
+        self.age(self.b, seconds=MESSAGE_TTL_SECONDS * 2)
         result = self.store.register(
-            "recipient", "tester", "other", agent_id=self.b["agent"]["agent_id"],
-            token=self.b["token"],
+            "recipient", "tester", "other",
+            agent_id=self.b["agent"]["agent_id"], token=self.b["token"],
         )
         self.assertFalse(result["created"])
         self.assertGreater(
             self.store._agent(self.b["agent"]["agent_id"])["last_mcp_activity"],
             time.time() - 5,
         )
-        self.assertEqual(self.store.prune_agents(at=time.time()+30), [])
 
     def test_legacy_sqlite_migrates_to_incremental_vacuum(self):
         import sqlite3
