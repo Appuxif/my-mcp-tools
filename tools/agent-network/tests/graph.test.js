@@ -43,3 +43,22 @@ test('single direction and self loops get usable geometry', () => {
   assert.ok(loop.labelY < 180);
   assert.equal(edgeGeometry(node(0,0),node(0,0)).path.includes(' C '),true);
 });
+
+test('grid layout scales without node collisions for 12, 40 and 90 agents', () => {
+  const {layoutGrid}=require('../dashboard/graph-utils.js');
+  for (const count of [12,40,90]) {
+    const grid=layoutGrid(count);
+    const points=Array.from({length:count},(_,i)=>grid.point(i));
+    assert.ok(grid.width >= 900 && grid.height >= 415);
+    for (let i=0;i<points.length;i++) {
+      const a=points[i];
+      assert.ok(a.x >= 132.5 && a.x <= grid.width-132.5);
+      assert.ok(a.y >= 60 && a.y <= grid.height-60);
+      for (let j=i+1;j<points.length;j++) {
+        const b=points[j];
+        assert.ok(Math.abs(a.x-b.x)>=300 || Math.abs(a.y-b.y)>=150,
+          `node overlap for ${count} agents: ${i} and ${j}`);
+      }
+    }
+  }
+});

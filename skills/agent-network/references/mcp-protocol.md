@@ -60,7 +60,11 @@ An agent connected directly to the native MCP calls `get_messages` without going
 | `last_wake_at`, `last_wake_result` | Time and result of a PUSH attempt; not proof of execution. |
 | Dashboard `online` | Separate rule: toggle enabled and heartbeat within ~35 seconds. |
 
-Inbound messages do not update the **recipient's** activity; they only update the sender's. If a recipient has made no MCP calls, sent no heartbeat, and had no profile/task updates for more than 24 hours, and has no live adapter, the server deletes its identity and related messages. A live PUSH adapter protects its agent from inactivity cleanup.
+Inbound messages do not update the recipient's activity; reconnecting with
+valid credentials does. Expired recipients reject new sends. If a recipient
+has pending unexpired messages, deletion is deferred until those messages
+have enjoyed their entire 24-hour TTL, even if the recipient remains idle.
+A connected PUSH adapter also protects a registered identity from cleanup.
 
 **Message TTL:** **24 hours from creation** regardless of whether the message is `pending` or `acknowledged`. Cleanup runs on server startup and approximately every five minutes. Inbox reads exclude expired items immediately. This is not long-term storage or guaranteed delivery.
 
@@ -71,3 +75,12 @@ Separately, the dashboard retains only the **latest 100 tool calls**, without ar
 The server running inside MyMCP is available by default at `http://127.0.0.1:8787/dashboard`. The dashboard shows the agent pool, activity times, `online`, `pending`, wake channels, and directed message arrows. Turning on **Dashboard agent** (the UI's agent toggle) registers the dashboard as an agent that can send messages and manually ACK its incoming queue.
 
 Arrow age labels are shown only for interactions within the past 10 minutes. An arrow without an age label does **not** mean the connection is inactive or absent. Never expose another agent's secrets or unrelated private message contents in reports or external tools.
+
+
+## Dashboard administration
+
+Administrative deletion requires a separate local administrator token stored
+beside the SQLite DB in `admin-token` (mode 0600). It does **not** require
+registering a dashboard agent; the browser requests the token separately
+and stores it in per-tab `sessionStorage`. The local dashboard is not a
+public multiuser administration interface. Do not share the token.

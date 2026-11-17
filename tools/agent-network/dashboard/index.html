@@ -51,7 +51,14 @@
       <article class="panel flow-panel">
         <div class="panel-heading">
           <div><div class="section-overline">NETWORK MAP</div><h3>Карта взаимодействий</h3></div>
-          <div class="legend"><span><i class="dot-online"></i> Онлайн</span><span><i class="dot-offline"></i> Офлайн</span><span><i class="legend-line"></i> Сообщения</span></div>
+          <div class="graph-controls">
+            <div class="legend"><span><i class="dot-online"></i> Онлайн</span><span><i class="dot-offline"></i> Офлайн</span><span><i class="legend-line"></i> Сообщения</span></div>
+            <div class="graph-zoom" aria-label="Масштаб карты">
+              <button type="button" id="graph-zoom-out" title="Уменьшить">−</button>
+              <button type="button" id="graph-zoom-reset" title="Сбросить масштаб"><span id="graph-zoom-value">100%</span></button>
+              <button type="button" id="graph-zoom-in" title="Увеличить">+</button>
+            </div>
+          </div>
         </div>
         <div class="graph-frame" id="graph-frame">
           <div class="graph-grid"></div>

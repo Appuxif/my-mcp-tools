@@ -9,6 +9,9 @@ import asyncio
 import contextlib
 import functools
 import os
+import secrets
+import stat
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +32,7 @@ class Config:
     wake_cooldown_seconds: float = 90.0
     wake_scan_seconds: float = 2.0
     maintenance_seconds: float = 300.0
+    admin_token_file: str = ""  # default: alongside the private SQLite database
 
 
 class AgentCreate(BaseModel):
@@ -65,6 +69,32 @@ class DashboardAck(BaseModel):
     message_id: str
 
 
+def load_admin_token(database: str, configured_file: str = "") -> tuple[str, str]:
+    """Persistent independent admin capability; never return it over HTTP."""
+    path = Path(configured_file) if configured_file else (
+        Path(database).resolve().parent / "admin-token"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        try:
+            with os.fdopen(fd, "w") as file:
+                file.write(secrets.token_urlsafe(40) + "\n")
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    mode = path.lstat().st_mode
+    if not stat.S_ISREG(mode) or mode & 0o077:
+        raise RuntimeError(f"Admin token file must be a private regular file (chmod 600): {path}")
+    token = path.read_text().strip()
+    if len(token) < 40:
+        raise RuntimeError("Agent Network admin token file is invalid")
+    return token, str(path)
+
+
 class Broker:
     def __init__(self, store: Store, config: Config):
         self.store = store
@@ -82,8 +112,9 @@ class Broker:
         self.store.prune_messages()
         self.store.prune_channels()
         self.store.prune_agents(
-            exclude_ids={owner for owner, _, _ in self.connections.values()}
+            exclude_ids={owner for owner, _, _ in list(self.connections.values())}
         )
+        self.store.maintain_storage()
         self.last_maintenance = time.monotonic()
 
     async def disconnect_agent(self, agent_id: str) -> None:
@@ -110,7 +141,7 @@ class Broker:
             await asyncio.sleep(self.config.wake_scan_seconds)
             try:
                 if time.monotonic() - self.last_maintenance >= self.config.maintenance_seconds:
-                    self.run_maintenance()
+                    await asyncio.to_thread(self.run_maintenance)
                 await self.dispatch_pending()
             except Exception:
                 # A transient channel failure must not kill the entire dispatcher.
@@ -207,6 +238,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     )
     store = Store(config.database)
     broker = Broker(store, config)
+    admin_token, admin_token_path = load_admin_token(
+        config.database, config.admin_token_file
+    )
+    logging.getLogger(__name__).info("Admin token file: %s", admin_token_path)
     started_at = time.time()
 
     mcp = MCPServer(
@@ -226,8 +261,16 @@ def create_app(config: Config | None = None) -> FastAPI:
         def logged(*args, **kwargs):
             started = time.perf_counter()
             status = "ok"
+            resolved_agent_id = ""
             try:
-                return fn(*args, **kwargs)
+                result = fn(*args, **kwargs)
+                if fn.__name__ == "register_agent":
+                    resolved_agent_id = result["agent"]["agent_id"]
+                else:
+                    # The only way here is through the successfully authenticated
+                    # handler; failed attempts remain unattributed.
+                    resolved_agent_id = str(kwargs.get("agent_id") or "")
+                return result
             except Exception:
                 status = "error"
                 raise
@@ -235,7 +278,7 @@ def create_app(config: Config | None = None) -> FastAPI:
                 store.record_tool_call(
                     fn.__name__, status,
                     (time.perf_counter() - started) * 1000,
-                    agent_id=str(kwargs.get("agent_id") or "")
+                    agent_id=resolved_agent_id
                 )
         return logged
 
@@ -308,6 +351,7 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.state.store = store
     app.state.broker = broker
     app.state.mcp = mcp
+    app.state.admin_token_file = admin_token_path
 
     @app.get("/api/v1/health")
     def health() -> dict:
@@ -376,6 +420,9 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(
                 403, "Agent deletion is available only on the local dashboard"
             )
+        supplied = req.headers.get("x-admin-token", "")
+        if not supplied or not secrets.compare_digest(supplied, admin_token):
+            raise HTTPException(401, "Administrator token required")
         try:
             result = store.delete_agent(target_agent_id)
         except ValueError as exc:

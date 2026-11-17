@@ -29,11 +29,32 @@
     [...document.querySelectorAll(s)].some(e => e.getClientRects().length > 0));
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+  function hasComposerAttachments(input) {
+    const form = input?.closest('form[data-chatgpt-composer]') ||
+                 input?.closest('form');
+    if (!form) return true; // unknown composer -> never risk a submission
+    // ChatGPT currently renders file/image chips inside this dedicated region.
+    // Treat *any* child as user context, including uploads still in progress.
+    const tray = form.querySelector('[data-composer-attachments]');
+    if (!tray) return true; // fail closed when the UI layout changes
+    if (tray.childElementCount > 0 || tray.textContent?.trim()) return true;
+    // The input can still own selected files before the tray renders them.
+    if ([...form.querySelectorAll('input[type="file"]')]
+          .some(el => (el.files?.length || 0) > 0)) return true;
+    // Additional upload/context states outside the standard chip region.
+    if (form.querySelector('[data-testid*="attachment-preview"], ' +
+        '[data-testid*="upload-progress"], [aria-label*="Uploading"], ' +
+        '[aria-label*="Загрузка"], [role="progressbar"]')) return true;
+    return false;
+  }
+
   function state() {
     const input = editor();
     if (!input || !location.pathname.includes('/c/') || document.readyState === 'loading')
       return { state: 'unknown', reason: 'no conversation or composer', url: location.href };
     if (isGenerating()) return { state: 'busy', reason: 'stop-generation control', url: location.href };
+    if (hasComposerAttachments(input))
+      return { state: 'draft', reason: 'attachments or upload in composer', url: location.href };
     if ((input.value ?? input.innerText ?? input.textContent ?? '').trim())
       return { state: 'draft', reason: 'composer contains user text', url: location.href };
     return { state: 'idle', reason: 'composer ready, no generation', url: location.href };
@@ -78,6 +99,8 @@
       if (location.href !== expectedUrl)
         throw Error('Conversation changed while sending');
       if (isGenerating()) throw Error('Chat started generating before submit');
+      if (hasComposerAttachments(input))
+        throw Error('Attachment appeared before wake submit; prompt left in composer');
       const button = one(sendSelectors);
       if (button && !button.disabled && button.getAttribute('aria-disabled') !== 'true') {
         button.click();

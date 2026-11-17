@@ -35,8 +35,8 @@ The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-
 1. Connect `agent-network` to ChatGPT through My MCP Tools. Open the intended existing conversation at `chatgpt.com/.../c/...`.
 2. In the extension popup, choose the server (local default `http://127.0.0.1:8787`), set the agent name, role, and description, then click **Start** (the button label may be localized).
 3. The extension registers that specific tab, stores its per-tab identity in `chrome.storage.local`, and sends a bootstrap message to ChatGPT with `agent_id` and `token`. Do not register again if the bootstrap already supplied the credentials.
-4. The extension monitors the DOM (composer, Stop generating, draft text) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
-5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, and the conversation URL has not changed. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
+4. The extension monitors the DOM (composer, Stop generating, text drafts, file/image attachments and uploading files) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
+5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, attachment or upload, and the conversation URL has not changed. If the attachment region is absent, wake is blocked rather than risking a file upload. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
 
 The extension never forwards incoming message bodies. Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
 
@@ -56,7 +56,9 @@ export AGENT_NETWORK_TOKEN='<my-secret-token>'
   --thread '<codex-thread-id>'
 ```
 
-Alternatively, provide `--token-file /path/to/secret` and restrict its permissions with `chmod 600`. Other options include `--server ws://127.0.0.1:8787/api/v1/channels/ws`, `--codex`, and `--no-resume`. The current MVP sidecar accepts **loopback WebSocket endpoints only**; a remote host requires a separate secured local transport or adapter.
+Alternatively, provide `--token-file /path/to/secret` and restrict its permissions with `chmod 600`. Other options include `--server ws://127.0.0.1:8787/api/v1/channels/ws`, `--codex`, and `--no-resume`. The sidecar validates the parsed WebSocket hostname and rejects all
+redirects before transmitting the agent token. Loopback WebSockets only;
+a remote host requires a separate secured local transport or adapter.
 
 On a wake, the adapter runs:
 
@@ -66,7 +68,13 @@ codex queue --thread <thread> --message "<wake hint>" --resume
 
 The hint instructs Codex to call `get_messages` through MCP; it does not include the task body. A successful CLI exit or a `queued` result does not establish that Codex actually resumed. Verify the subsequent MCP call and, where possible, an `ack_message` or reply.
 
-**Current limitation:** the Codex sidecar announces `idle` upon connection but does not measure the real Codex session's busy state with application-level heartbeats. The server additionally checks recent MCP activity, but that is only a heuristic. Do not claim second-accurate idle detection.
+**Codex activity:** the sidecar inspects local rollout lifecycle events
+(`task_started`, `task_complete`, `turn_aborted`) for the configured thread UUID
+and sends an `idle`, `busy` or `unknown` heartbeat every 20 seconds. Unknown
+states do not trigger wake. Named sessions or custom launchers can provide
+a `--state-file /path/to/file` containing `busy`, `idle`, or `unknown`, refreshed
+at least once a minute. `--assume-idle` is an explicitly unsafe fallback.
+The server still checks MCP activity; detection remains best-effort.
 
 Do not start multiple independent sidecars for the same Codex thread. Do not set up daemons or system autostart on your own: launch the extra program when needed and with the user's permission.
 

@@ -119,6 +119,43 @@ class Store:
                     created_at REAL NOT NULL
                 )
             """)
+        # Enable incremental compaction on new and existing file-backed DBs.
+        # Existing databases need a one-time VACUUM to change auto_vacuum mode.
+        if path != ":memory:":
+            with self.lock:
+                if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+                    self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
+                    self.db.execute("VACUUM")
+
+    def maintain_storage(self) -> dict:
+        """Return unused SQLite pages to the OS without compacting every sweep."""
+        with self.lock:
+            free = self.db.execute("PRAGMA freelist_count").fetchone()[0]
+            if free:
+                self.db.execute(f"PRAGMA incremental_vacuum({min(free, 2048)})")
+            # Keep WAL files from retaining a peak-size journal indefinitely.
+            self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return {"free_pages_before": free}
+
+    @staticmethod
+    def _last_activity(agent: sqlite3.Row) -> float:
+        return max(agent["created_at"], agent["updated_at"],
+                   agent["last_mcp_activity"] or 0,
+                   agent["last_channel_activity"] or 0,
+                   agent["last_dashboard_seen"] or 0)
+
+    def _has_live_channel(self, agent_id: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM channels WHERE agent_id=? AND connected=1 LIMIT 1",
+            (agent_id,),
+        ).fetchone() is not None
+
+    def _has_pending_messages(self, agent_id: str, at: float) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM messages WHERE recipient_id=? AND status='pending' "
+            "AND created_at>? LIMIT 1",
+            (agent_id, at - MESSAGE_TTL_SECONDS),
+        ).fetchone() is not None
 
     def prune_messages(self, *, at: float | None = None) -> dict:
         """Delete ALL messages older than 24 hours, independent of status.
@@ -180,12 +217,11 @@ class Store:
                 agent_id = row["agent_id"]
                 if agent_id in excluded:
                     continue
-                # Never erase a currently connected adapter session.
-                attached = self.db.execute(
-                    "SELECT 1 FROM channels WHERE agent_id=? AND connected=1",
-                    (agent_id,)
-                ).fetchone()
-                if attached:
+                if self._has_live_channel(agent_id):
+                    continue
+                # Preserve the full 24-hour TTL of previously accepted messages.
+                # New messages to already-expired recipients are rejected.
+                if self._has_pending_messages(agent_id, now() if at is None else at):
                     continue
                 deleted.append(self.delete_agent(agent_id))
         return deleted
@@ -403,7 +439,11 @@ class Store:
                 if not agent_id or existing["agent_id"] != agent_id:
                     raise ValueError("Agent name already registered; use its id and token to reconnect")
                 self.verify(agent_id, token)
-                return {"agent": public_agent(existing), "token": token, "created": False}
+                self.db.execute(
+                    "UPDATE agents SET last_mcp_activity=? WHERE agent_id=?",
+                    (now(), agent_id),
+                )
+                return {"agent": public_agent(self._agent(agent_id)), "token": token, "created": False}
             if agent_id:
                 raise ValueError("Unknown agent identity; omit id to create a new agent")
             agent_id = opaque_id()
@@ -478,6 +518,12 @@ class Store:
                         raise ValueError("Idempotency key reused with different message")
                     return {"message_id": existing["message_id"], "duplicate": True}
             recipient = self.resolve(to)
+            # An expired identity must not accept messages that maintenance
+            # will immediately destroy. This check is atomic with the insert.
+            stamp = now()
+            if (self._last_activity(recipient) <= stamp - MESSAGE_TTL_SECONDS
+                    and not self._has_live_channel(recipient["agent_id"])):
+                raise ValueError("Recipient agent has expired; refresh the agent list")
             message_id = opaque_id()
             self.db.execute(
                 "INSERT INTO messages(message_id,sender_id,recipient_id,body,task_id,client_message_id,created_at) "

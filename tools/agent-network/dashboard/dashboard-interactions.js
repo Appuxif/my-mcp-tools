@@ -2,6 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   const key = 'agent-network:dashboard-agent:v1';
+  const adminKey = 'agent-network:admin-token:v1';
   const short = name => name.length > 20 ? name.slice(0, 19) + '…' : name;
   const ago = time => {
     if (!time) return 'никогда';
@@ -38,7 +39,8 @@
     }
     const res = await fetch(url, {
       method: options.method || 'GET',
-      headers, cache:'no-store', credentials:'same-origin',
+      headers:{...headers, ...(options.headers || {})},
+      cache:'no-store', credentials:'same-origin',
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
     });
     const data = await res.json().catch(() => ({}));
@@ -321,11 +323,20 @@
       'Имя освободится; прежний токен перестанет работать.'
     );
     if (!accepted) return;
+    let adminToken = sessionStorage.getItem(adminKey) || '';
+    if (!adminToken) {
+      adminToken = prompt(
+        'Administrator token (from tools/agent-network/data/admin-token ' +
+        'on the server). This is independent of the dashboard agent.'
+      )?.trim() || '';
+      if (!adminToken) return;
+      sessionStorage.setItem(adminKey, adminToken);
+    }
     button.disabled = true;
     try {
       const result = await api(
         '/api/v1/dashboard/agents/' + encodeURIComponent(targetId),
-        {method:'DELETE'}
+        {method:'DELETE', headers:{'X-Admin-Token':adminToken}}
       );
       if (targetId === identity?.agent_id) {
         identity = null;
@@ -341,7 +352,12 @@
       document.dispatchEvent(new CustomEvent('agent-network:refresh'));
       void refreshHistories();
     } catch (error) {
-      status('Удаление: ' + String(error.message || error), true);
+      if (error.status === 401) {
+        sessionStorage.removeItem(adminKey);
+        status('Неверный административный токен. Повторите удаление для нового ввода.', true);
+      } else {
+        status('Удаление: ' + String(error.message || error), true);
+      }
     } finally {
       // Inspector refresh hides the button if its selected agent is gone.
       button.disabled = !button.dataset.agentId;

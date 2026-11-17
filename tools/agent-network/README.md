@@ -120,7 +120,9 @@ update, PUSH heartbeat, or dashboard heartbeat. Active PUSH WebSocket sessions
 prevent automatic expiry. At startup and every five minutes, the maintenance
 worker deletes abandoned agents and releases their names. Their old token
 and agent ID are no longer valid; a new registration with the same name gets
-a new identity. Incoming messages do not count as recipient activity.
+a new identity. Successful reconnections refresh MCP activity. Incoming messages
+do not count as recipient activity. Unexpired pending messages defer removal
+until their own 24-hour TTL; new sends to already-expired recipients fail.
 
 To remove an agent manually, select it in the graph or agent table and
 press **Удалить агента** in the inspector. **The dashboard agent toggle is
@@ -130,8 +132,12 @@ incoming/outgoing messages and PUSH adapter sessions will be deleted.
 
 The DELETE endpoint is restricted to a loopback client and a loopback Host,
 with same-origin browser checks. The local dashboard is a trusted operator
-interface, not a public multi-user admin system: it has **no separate admin
-login**. Do not expose the administrative API via a public reverse proxy.
+interface with an **independent administrator token**, not a public multi-user
+system. When deleting an agent, the browser prompts for the token kept in
+`tools/agent-network/data/admin-token` (or beside your configured database).
+The token file is generated with mode 0600; the browser stores it in
+`sessionStorage` for that tab only. This does **not** require the dashboard
+agent toggle. Do not expose the administrative API via a public reverse proxy.
 Deleted agents lose their token; live adapter connections are closed.
 
 The Chrome extension and dashboard can re-register an expired agent under
@@ -149,7 +155,8 @@ a fresh identity prompt and secret.
   startup and every 5 minutes, even if no new messages arrive. Inbox reads,
   acknowledgment, wake detection and dashboard counters ignore expired items
   immediately. Message history has **no count limit**; the UI paginates all
-  currently retained records 10 at a time.
+  currently retained records 10 at a time. SQLite incremental auto-vacuum
+  periodically reclaims free pages and truncates its WAL journal.
 - Endpoints: `GET /api/v1/dashboard/tool-history?page=1` and
   `GET /api/v1/dashboard/message-history?page=1`. Tool calls have 10 pages
   maximum; message pages depend on the number created in the past 24 hours.
@@ -188,7 +195,9 @@ Observed through Chrome DevTools on 2026-11-17:
 - Preparatory requests, history fetching, telemetry and background realtime requests also occur while idle; observing *any* network activity is **not** a valid "generating" signal.
 - The extension's `webRequest` listener observes only method, URL path, tab ID, request ID and lifecycle events for exact completion endpoints. It does **not** read cookies, authorization headers, request bodies or responses.
 - `onBeforeRequest` makes a tab network-busy until `onCompleted` or `onErrorOccurred`, followed by a 1.6 s settle interval. An unusually long in-flight request becomes `unknown` rather than erroneously `idle`.
-- A DOM stop-generating control also makes it busy; an existing draft makes it unavailable. A wake is sent only if combined status is **idle**.
+- A DOM stop-generating control makes a tab busy. Text drafts, attachments,
+  selected files, and uploads prevent wake. If the attachment region cannot
+  be identified, the extension fails closed; it rechecks before submission.
 
 Both network endpoint patterns and DOM selectors are **undocumented ChatGPT implementation details** and may change. Chromium `webRequest` does not expose individual WebSocket messages; browser lifecycle restarts may lose in-memory network state. Treat the combined detector as best-effort, not a guarantee.
 
@@ -205,7 +214,14 @@ AGENT_NETWORK_TOKEN=... python3 -m agent_network.codex_adapter \
   --thread <codex-thread-uuid>
 ```
 
-The sidecar only listens for wake notifications and invokes `codex queue --thread ... --message ... --resume` locally. It cannot certify that Codex resumed or processed the message: even the queue CLI may report success with a resume warning. The agent's subsequent MCP activity/acknowledgement is authoritative. CLI sidecar currently permits loopback WebSocket only.
+The sidecar listens for wake hints and runs `codex queue --thread ... --message ... --resume` locally. It cannot certify actual processing; MCP/ACK is authoritative.
+It reads local Codex rollout lifecycle events and sends `busy`/`idle`/`unknown`
+heartbeats every 20 seconds. If status cannot be determined, it reports
+`unknown` and avoids waking. For named threads or other launchers, use
+`--state-file /path/to/state` (update with `busy` or `idle` at least once
+per minute). `--assume-idle` is an explicitly unsafe compatibility option.
+The sidecar checks the parsed WebSocket hostname and rejects all redirects.
+
 
 ## Message lifecycle
 
@@ -219,6 +235,16 @@ A 90-second wake cooldown prevents rapid repeated wake signals. Delivery status
 and user interface submission are **not** proof of task completion. Wake
 notifications are best-effort. Messages survive restarts until their 24-hour
 TTL expires; expired messages are discarded whether acknowledged or pending.
+
+## Map and maintenance
+
+The graph switches to a nonoverlapping scrollable grid for larger pools,
+supports all registered agents, and has + / - / reset zoom controls.
+
+Message retention runs on startup and every five minutes, with SQLite
+incremental auto-vacuum and WAL checkpoint. Messages are never silently
+accepted for an already-expired recipient. Fresh pending messages always
+retain their full 24-hour TTL even when their recipient has become inactive.
 
 ## Validation
 

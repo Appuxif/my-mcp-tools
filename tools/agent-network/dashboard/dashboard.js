@@ -38,6 +38,26 @@
   let snapshot = null;
   let selectedId = null;
   let inflight = false;
+  let graphZoom = 1;
+  let graphDimensions = {width:900,height:415};
+  const applyGraphZoom = () => {
+    const svg = $('graph');
+    svg.style.width = graphDimensions.width * graphZoom + 'px';
+    svg.style.height = graphDimensions.height * graphZoom + 'px';
+    $('graph-zoom-value').textContent = Math.round(graphZoom * 100) + '%';
+  };
+  $('graph-zoom-in').addEventListener('click', () => {
+    graphZoom = Math.min(2, Math.round((graphZoom + 0.2) * 10) / 10);
+    applyGraphZoom();
+  });
+  $('graph-zoom-out').addEventListener('click', () => {
+    graphZoom = Math.max(0.5, Math.round((graphZoom - 0.2) * 10) / 10);
+    applyGraphZoom();
+  });
+  $('graph-zoom-reset').addEventListener('click', () => {
+    graphZoom = 1;
+    applyGraphZoom();
+  });
 
   function nameLines(name, maxChars = 24) {
     // Preserve every character. SVG cannot wrap text automatically.
@@ -58,29 +78,36 @@
   function graph(data) {
     const svg = $('graph');
     svg.replaceChildren();
-    const agents = data.agents.slice(0, 40);
+    const agents = data.agents;
     $('graph-empty').hidden = !!agents.length;
     $('graph-summary').textContent = agents.length
       ? fmt(agents.length) + ' узлов · ' + fmt(data.edges.length) + ' связей'
       : 'Ожидание регистрации первого агента';
-    if (!agents.length) return;
-    const W = 900, H = 415;
+    if (!agents.length) {
+      graphDimensions = {width:900,height:415};
+      applyGraphZoom();
+      return;
+    }
+    const grid = agents.length >= 6 ? AgentNetworkGraph.layoutGrid(agents.length) : null;
+    const W = grid ? grid.width : 900, H = grid ? grid.height : 415;
+    graphDimensions = {width:W,height:H};
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    applyGraphZoom();
     const positions = new Map();
     agents.forEach((agent, index) => {
       const angle = -Math.PI / 2 + 2 * Math.PI * index / Math.max(agents.length, 1);
-      const radiusX = agents.length <= 2 ? 260 : agents.length <= 8 ? 285 : 325;
-      const radiusY = agents.length <= 2 ? 0 : agents.length <= 8 ? 137 : 163;
       const lines = nameLines(agent.name);
       const longest = Math.max(...lines.map(line => line.length));
       const width = Math.max(175, Math.min(265, longest * 7.6 + 48));
       const height = 62 + (lines.length - 1) * 17;
-      positions.set(agent.agent_id, {
+      const point = grid ? grid.point(index) : {
         x: agents.length === 1 ? W / 2 :
            agents.length === 2 ? (index === 0 ? 245 : 655) :
-           W / 2 + Math.cos(angle) * radiusX,
-        y: agents.length <= 2 ? H / 2 : H / 2 + Math.sin(angle) * radiusY,
-        lines, width, height
-      });
+           W / 2 + Math.cos(angle) * (agents.length <= 2 ? 260 : 285),
+        y: agents.length <= 2 ? H / 2 :
+           H / 2 + Math.sin(angle) * 137,
+      };
+      positions.set(agent.agent_id, {...point, lines, width, height});
     });
     const defs = newSvg('defs');
     const arrow = newSvg('marker', {id:'flow-arrow', markerWidth:7, markerHeight:7,

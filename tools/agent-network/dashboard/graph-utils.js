@@ -49,7 +49,24 @@
     };
   }
 
-  const api = {edgeAge, edgeGeometry};
+  function layoutGrid(count) {
+    const columns = Math.min(7, Math.max(3, Math.ceil(Math.sqrt(count * 1.5))));
+    const rows = Math.ceil(count / columns);
+    const cellWidth = 330, cellHeight = 160;
+    const width = Math.max(900, columns * cellWidth + 80);
+    const height = Math.max(415, rows * cellHeight + 80);
+    return {
+      width, height, columns, rows,
+      point(index) {
+        return {
+          x: 40 + (index % columns + 0.5) * cellWidth,
+          y: 40 + (Math.floor(index / columns) + 0.5) * cellHeight
+        };
+      },
+    };
+  }
+
+  const api = {edgeAge, edgeGeometry, layoutGrid};
   globalThis.AgentNetworkGraph = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

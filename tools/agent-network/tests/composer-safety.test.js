@@ -1,0 +1,88 @@
+const {test} = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+
+const code = fs.readFileSync(path.join(__dirname, '..', 'extension', 'content.js'), 'utf8');
+
+function chat({attached=false, fileSelected=false, attachAfterInsert=false, text=''}={}) {
+  let listener, clicks=0;
+  const tray={childElementCount:attached ? 1 : 0, textContent:''};
+  const file={files:fileSelected ? [{name:'private.pdf'}] : []};
+  const form={
+    querySelector(selector) {
+      if (selector === '[data-composer-attachments]') return tray;
+      return null;
+    },
+    querySelectorAll(selector) {
+      return selector === 'input[type="file"]' ? [file] : [];
+    },
+  };
+  const input={
+    value:'', innerText:text, textContent:text,
+    closest() { return form; },
+    focus() {},
+  };
+  const send={disabled:false,getAttribute(){return null;},click(){clicks++;}};
+  const selection={removeAllRanges(){},addRange(){}};
+  const globals={
+    location:{href:'https://chatgpt.com/c/test',pathname:'/c/test'},
+    document:{
+      readyState:'complete',
+      querySelector(selector) {
+        if (selector === '#prompt-textarea') return input;
+        if (selector === '#composer-submit-button') return send;
+        return null;
+      },
+      querySelectorAll() {return [];},
+      createRange(){return {selectNodeContents(){}};},
+      execCommand(){if(attachAfterInsert) tray.childElementCount=1;input.innerText='Wake';return true;},
+    },
+    chrome:{runtime:{onMessage:{addListener(fn){listener=fn;}}}},
+    getSelection(){return selection;},
+    HTMLTextAreaElement:class {},
+    HTMLInputElement:class {},
+    Event:class {},
+    InputEvent:class {},
+    setTimeout,
+    Promise,
+  };
+  globals.globalThis=globals;
+  vm.runInNewContext(code,globals);
+  const run=message => new Promise(resolve => listener(message,null,resolve));
+  return {run,clicks:()=>clicks};
+}
+
+test('wake refuses an attached file even when composer text is empty',async()=>{
+  const page=chat({attached:true});
+  const s=await page.run({type:'agent:probe'});
+  assert.equal(s.state,'draft');
+  assert.match(s.reason,/attachments/);
+  const result=await page.run({type:'agent:send',text:'Wake',url:'https://chatgpt.com/c/test'});
+  assert.equal(result.ok,false);
+  assert.equal(page.clicks(),0);
+});
+
+test('selected file input blocks wake before upload chip is created',async()=>{
+  const page=chat({fileSelected:true});
+  assert.equal((await page.run({type:'agent:probe'})).state,'draft');
+  assert.equal((await page.run({type:'agent:send',text:'Wake',url:'https://chatgpt.com/c/test'})).ok,false);
+  assert.equal(page.clicks(),0);
+});
+
+test('a file attached while the wake text is being inserted blocks submit',async()=>{
+  const page=chat({attachAfterInsert:true});
+  assert.equal((await page.run({type:'agent:probe'})).state,'idle');
+  const response=await page.run({type:'agent:send',text:'Wake',url:'https://chatgpt.com/c/test'});
+  assert.equal(response.ok,false);
+  assert.equal(page.clicks(),0);
+});
+
+test('plain idle composer without attachments is still wakeable',async()=>{
+  const page=chat();
+  assert.equal((await page.run({type:'agent:probe'})).state,'idle');
+  const response=await page.run({type:'agent:send',text:'Wake',url:'https://chatgpt.com/c/test'});
+  assert.equal(response.ok,true);
+  assert.equal(page.clicks(),1);
+});

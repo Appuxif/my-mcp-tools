@@ -12,9 +12,38 @@ import os
 import shutil
 import subprocess
 import sys
+from urllib.parse import urlsplit
+
+from websockets.asyncio.client import connect as WebSocketConnect
+
+from .codex_state import detect_state
 from pathlib import Path
 
 import websockets
+
+
+def validate_server_url(raw: str) -> str:
+    """Validate the *parsed* WebSocket endpoint, never a string prefix."""
+    try:
+        uri = urlsplit(raw)
+        if (uri.scheme != "ws" or uri.hostname not in
+                ("localhost", "127.0.0.1", "::1") or
+                uri.username is not None or uri.password is not None or
+                uri.path != "/api/v1/channels/ws" or uri.query or uri.fragment or
+                not uri.port):
+            raise ValueError("Codex wake requires a loopback WebSocket endpoint")
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Invalid local WebSocket URL") from exc
+    return raw
+
+
+class LocalOnlyConnect(WebSocketConnect):
+    def process_redirect(self, exc):
+        redirect = super().process_redirect(exc)
+        # Even redirects to another loopback port can leak the bearer secret.
+        if isinstance(redirect, str):
+            return ValueError("Codex wake WebSocket redirects are forbidden")
+        return redirect
 
 
 def queue_wake(thread: str, agent_id: str, count: int,
@@ -44,16 +73,21 @@ def queue_wake(thread: str, agent_id: str, count: int,
 
 
 async def run(server: str, agent_id: str, token: str,
-              thread: str, codex: str, resume: bool):
+              thread: str, codex: str, resume: bool,
+              state_file: Path | None = None, assume_idle: bool = False):
     delay = 1
     while True:
         try:
-            async with websockets.connect(
-                server, origin=None, ping_interval=20, max_size=65536
+            state = await asyncio.to_thread(
+                detect_state, thread, state_file=state_file, assume_idle=assume_idle
+            )
+            async with LocalOnlyConnect(
+                server, origin=None, ping_interval=20, max_size=65536,
+                proxy=None,
             ) as socket:
                 await socket.send(json.dumps({
                     "type": "register", "agent_id": agent_id,
-                    "token": token, "kind": "codex", "state": "idle",
+                    "token": token, "kind": "codex", "state": state,
                 }))
                 first = json.loads(await socket.recv())
                 if first.get("type") != "registered":
@@ -61,7 +95,16 @@ async def run(server: str, agent_id: str, token: str,
                 print(f"Codex wake sidecar connected for agent {agent_id}", flush=True)
                 delay = 1
                 while True:
-                    msg = json.loads(await socket.recv())
+                    try:
+                        message = await asyncio.wait_for(socket.recv(), timeout=20)
+                    except asyncio.TimeoutError:
+                        state = await asyncio.to_thread(
+                            detect_state, thread, state_file=state_file,
+                            assume_idle=assume_idle
+                        )
+                        await socket.send(json.dumps({"type":"ping","state":state}))
+                        continue
+                    msg = json.loads(message)
                     if msg.get("type") == "wake":
                         status, detail = await asyncio.to_thread(
                             queue_wake, thread, agent_id, int(msg.get("pending_count", 0)),
@@ -92,6 +135,10 @@ def main():
     p.add_argument("--token-file", help="File containing the per-agent secret (chmod 600)")
     p.add_argument("--codex", default="codex")
     p.add_argument("--no-resume", action="store_true")
+    p.add_argument("--state-file",
+                   help="File periodically written by the Codex launcher: idle/busy/unknown")
+    p.add_argument("--assume-idle", action="store_true",
+                   help="Unsafe compatibility mode if the thread cannot be inspected")
     a = p.parse_args()
     if a.token_file:
         path = Path(a.token_file)
@@ -102,11 +149,15 @@ def main():
         token = os.getenv("AGENT_NETWORK_TOKEN", "")
     if not token:
         p.error("Set AGENT_NETWORK_TOKEN or provide --token-file")
-    if not a.server.startswith(("ws://127.0.0.1:", "ws://localhost:", "ws://[::1]:")):
-        p.error("MVP wake sidecar accepts only a loopback WebSocket endpoint")
+    try:
+        validate_server_url(a.server)
+    except ValueError as exc:
+        p.error(str(exc))
     try:
         asyncio.run(run(a.server, a.agent_id, token, a.thread, a.codex,
-                        not a.no_resume))
+                        not a.no_resume,
+                        state_file=Path(a.state_file) if a.state_file else None,
+                        assume_idle=a.assume_idle))
     except KeyboardInterrupt:
         pass
 

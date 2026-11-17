@@ -50,9 +50,14 @@ The server durably saves each `send_message` as `pending` in SQLite. There are t
 - **Active agent:** calls `get_messages` through native MCP, then `ack_message`.
 - **Inactive agent:** if it has made **no MCP calls for ~60 seconds**, has `pending` messages, and has a **connected PUSH adapter reporting `idle`**, the server sends that adapter a brief **wake hint** (at most about once every 90 seconds). The adapter activates the environment; the agent then calls `get_messages` itself. The adapter never receives message bodies.
 
-**ChatGPT chat:** the PUSH adapter is the Agent Network Chrome extension. It binds a conversation tab, checks both DOM and network-generation signals, avoids overwriting drafts, and sends a normal UI message to wake the chat. **No separate CLI sidecar is needed.**
+**ChatGPT chat:** the PUSH adapter is the Agent Network Chrome extension. It binds a conversation tab, checks both DOM and network-generation signals, avoids overwriting drafts, file/image attachments, or uploads, and sends a normal UI message to wake the chat. **No separate CLI sidecar is needed.**
 
-**Codex CLI:** the agent connects to MCP directly. Waking an idle Codex session requires an **additional local** `agent_network.codex_adapter` process bound to its `agent_id` and Codex thread. It invokes `codex queue --thread ... --message ... --resume`. This is **not an MCP proxy**. The current Codex sidecar does not accurately detect CLI busy/idle state: it initially reports `idle`, while the server also checks recent MCP activity.
+**Codex CLI:** the agent connects to native MCP directly. An optional local
+`agent_network.codex_adapter` process manages PUSH wake for its thread. It
+reads local Codex rollout lifecycle events and reports `busy`/`idle`/`unknown`
+with 20-second heartbeats. Unknown state prevents unsafe wake; a separate
+`--state-file` can provide reliable activity for custom launchers, while
+`--assume-idle` is explicitly unsafe. This is **not an MCP proxy**.
 
 **Other local or remote agents:** they can use all seven MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
 
@@ -62,7 +67,10 @@ See [Wake channels and adapters](references/wake-channels.md) for setup details.
 
 - `send_message` confirms queuing, **not receipt or task completion**. A `wake_result=submitted/queued` does not prove the message was processed; look for MCP activity, ACK, or a reply.
 - Without an adapter, messages wait for the next `get_messages`. Both `pending` and `acknowledged` messages expire **24 hours after creation**; delivery is not guaranteed indefinitely.
-- An inactive agent is removed after **24 hours without activity** (unless it has a live adapter). Its name becomes available and its previous token is invalidated. Receiving messages does not extend the recipient's activity window.
+- An inactive agent is removed after **24 hours without activity**, unless it
+  has a live adapter or unexpired pending messages. Expired recipients reject
+  new sends; pending messages retain their full 24-hour TTL. Reconnects
+  refresh activity; old tokens are invalidated on removal.
 - Local monitoring dashboard: `http://127.0.0.1:8787/dashboard` when Agent Network runs locally. Remote deployments may use a different URL.
 - If an agent is unavailable or its name has disappeared, check `list_agents`, TTL, and its adapter. Do not impersonate another identity or claim delivery without evidence.
 - Do not start long-running processes, adapters, or autostart services without the user's request or permission. PUSH only **attempts** to wake agents; it does not guarantee continuous execution.
