@@ -13,7 +13,7 @@ const OTHER='https://chatgpt.com/c/6afc8b42-4bc8-83ed-8236-589f43d07958';
 function networkHarness({
   legacy=null,initial=null,urls=[PROJECT,PLAIN],
   newChatCreatesId=true,failMigrationSend=false,verifyFails=false,
-  registrationDelay=0,
+  registrationDelay=0,sendDelay=0,socketStartsOpen=true,
 }={}) {
   const data = {
     agentsByChat:initial || {},
@@ -22,7 +22,8 @@ function networkHarness({
     serverByTab:{}
   };
   const tabs = new Map(urls.map((url,i)=>[i+10,{id:i+10,url}]));
-  const events=[],sockets=[],listeners={};
+  const events=[],sockets=[],listeners={},intervals=new Map();
+  let nextIntervalId=1;
   const hook=name=>({addListener(fn){listeners[name]=fn;}});
   const chrome={
     webRequest:{onBeforeRequest:hook('before'),onCompleted:hook('done'),onErrorOccurred:hook('failed')},
@@ -40,6 +41,7 @@ function networkHarness({
         switch(message.type) {
           case 'agent:probe':return {state:'idle'};
           case 'agent:send': {
+            if(sendDelay) await new Promise(resolve=>setTimeout(resolve,sendDelay));
             if (message.allowNewChat && failMigrationSend)
               return {ok:false,error:'Composer is busy'};
             if(message.allowNewChat && newChatCreatesId) {
@@ -68,14 +70,33 @@ function networkHarness({
     }},
   };
   class Socket {
+    static CONNECTING=0;
     static OPEN=1;
-    readyState=1;
+    static CLOSED=3;
+    readyState=socketStartsOpen ? 1 : 0;
     constructor(url){
       this.url=url;this.closed=false;sockets.push(this);
       events.push({kind:'socket',url});
     }
-    close(){this.closed=true;this.readyState=3;}
-    send(payload){events.push({kind:'socketSend',payload:JSON.parse(payload)});}
+    open(){
+      if(this.closed)throw Error('Socket already closed');
+      this.readyState=Socket.OPEN;
+      this.onopen?.();
+    }
+    close(){
+      this.closed=true;this.readyState=Socket.CLOSED;
+      this.onclose?.();
+    }
+    serverClose(){this.close();}
+    fail(){
+      this.onerror?.(new Error('Connection lost'));
+      this.serverClose();
+    }
+    receive(payload){this.onmessage?.({data:JSON.stringify(payload)});}
+    send(payload){
+      if(this.readyState!==Socket.OPEN)throw Error('Socket is not open');
+      events.push({kind:'socketSend',payload:JSON.parse(payload)});
+    }
   }
   let created=0;
   const fetch=async (url,options)=>{
@@ -104,7 +125,9 @@ function networkHarness({
   };
   const context=vm.createContext({
     chrome,URL,console,fetch,WebSocket:Socket,AbortSignal,
-    Promise,setTimeout,importScripts(){},setInterval(){return 1},clearInterval(){},
+    Promise,setTimeout,importScripts(){},
+    setInterval(fn){const id=nextIntervalId++;intervals.set(id,fn);return id;},
+    clearInterval(id){intervals.delete(id);},
     AgentNetworkTraffic:{
       TrafficTracker:class{started(){}finished(){}clear(){}snapshot(){return {phase:'idle',activeRequests:0}}},
       combineState(dom){return {state:dom}},
@@ -128,6 +151,8 @@ function networkHarness({
       const tab=tabs.get(tabId);tab.url=url;
       listeners.updated(tabId,{url});await tick();
     },
+    alarm:async()=>{listeners.alarm({name:'agent-network-resume'});await tick();},
+    ping:async()=>{for(const fn of intervals.values())fn();await tick();},
     open:(tabId,url)=>{tabs.set(tabId,{id:tabId,url});},
     get registrations(){return created;}
   };
@@ -491,4 +516,171 @@ test('migration from ChatGPT project landing /project URL succeeds without anoth
   assert.equal(h.data.agentsByChat[PLAIN],undefined);
   assert.equal(h.data.agentsByChat[result.toChatUrl].agentId,preview.agentId);
   assert.equal(h.events.filter(e=>e.type==='agent:send').at(-1).body.allowNewChat,true);
+});
+
+
+test('storage writes from two independent async paths cannot overwrite each other',async()=>{
+  const h=networkHarness({urls:[]});
+  // Independent copy-on-read mimics real chrome.storage.local. Without the
+  // serialized updateRecords queue, the last writer destroys the first.
+  const a=vm.runInContext(
+    "updateRecords(entries => { entries['"+PLAIN+"']={agentId:'A'}; })",h.context);
+  const b=vm.runInContext(
+    "updateRecords(entries => { entries['"+OTHER+"']={agentId:'B'}; })",h.context);
+  await Promise.all([a,b]);
+  assert.equal(h.data.agentsByChat[PLAIN].agentId,'A');
+  assert.equal(h.data.agentsByChat[OTHER].agentId,'B');
+});
+
+test('navigation while HTTP registration is in flight stores inactive recoverable identity',async()=>{
+  const h=networkHarness({urls:[PLAIN,OTHER],registrationDelay:45});
+  const pending=h.start(10);
+  await new Promise(resolve=>setTimeout(resolve,8));
+  await h.navigate(10,OTHER);
+  const result=await pending;
+  assert.equal(result.ok,false);
+  assert.match(result.error,/Чат изменился/);
+  assert.equal(h.registrations,1);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[PLAIN].bootstrapDone,false);
+  assert.equal(h.data.agentsByChat[PLAIN].ownerTabId,null);
+  assert.equal(h.sockets.length,0);
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,0);
+  await h.navigate(10,PLAIN);
+  const retried=await h.start(10);
+  assert.equal(retried.ok,true,retried.error);
+  assert.equal(retried.created,false);
+  assert.equal(h.registrations,1,'retry must reuse the already issued identity');
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+});
+
+test('closing the tab while registering does not create an active ghost agent',async()=>{
+  const h=networkHarness({urls:[PLAIN],registrationDelay:45});
+  const pending=h.start(10);
+  await new Promise(resolve=>setTimeout(resolve,8));
+  await h.close(10);
+  const result=await pending;
+  assert.equal(result.ok,false);
+  assert.equal(h.registrations,1);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[PLAIN].bootstrapDone,false);
+  assert.equal(h.data.agentsByChat[PLAIN].ownerTabId,null);
+  assert.equal(h.sockets.length,0);
+});
+
+test('navigation while bootstrap is pending never marks the registration as initialized',async()=>{
+  const h=networkHarness({urls:[PLAIN],sendDelay:45});
+  const pending=h.start(10);
+  for(let n=0;n<100 && !h.events.some(e=>e.type==='agent:send');n++)
+    await new Promise(resolve=>setTimeout(resolve,1));
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,1);
+  await h.navigate(10,OTHER);
+  const result=await pending;
+  assert.equal(result.ok,false);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[PLAIN].bootstrapDone,false);
+  assert.equal(h.data.agentsByChat[PLAIN].ownerTabId,null);
+  assert.equal(h.sockets.length,0);
+});
+
+test('Start after Stop reuses identity without sending duplicate bootstrap',async()=>{
+  const h=networkHarness({urls:[PLAIN]});
+  await h.start(10);
+  const stopped=await h.request(10,'network:stop');
+  assert.equal(stopped.ok,true);
+  const restarted=await h.start(10);
+  assert.equal(restarted.ok,true);
+  assert.equal(restarted.created,false);
+  assert.equal(h.registrations,1);
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,1);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+});
+
+test('WebSocket lifecycle registers, fails, reconnects, and stops without duplicates',async()=>{
+  const h=networkHarness({urls:[PLAIN,PROJECT],socketStartsOpen:false});
+  const started=await h.start(10);
+  assert.equal(started.ok,true,started.error);
+  assert.equal(h.sockets.length,1);
+  assert.equal((await h.request(10,'network:status')).connected,false);
+  h.sockets[0].open();
+  await h.tick();
+  const sent=h.events.filter(e=>e.kind==='socketSend');
+  assert.equal(sent.filter(e=>e.payload.type==='register').length,1);
+  assert.equal(sent.at(-1).payload.agent_id,'uuid-identity-1');
+  h.sockets[0].receive({type:'wake',wake_id:'w1',pending_count:1});
+  await h.tick();
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,2);
+  assert.ok(h.events.some(e=>e.payload?.type==='wake_result' && e.payload.status==='submitted'));
+
+  h.sockets[0].fail();
+  await h.alarm();
+  assert.equal(h.sockets.length,2,'alarm should restore connection once');
+  await h.alarm();
+  assert.equal(h.sockets.length,2,'second alarm cannot duplicate socket');
+  h.sockets[1].open();
+  await h.tick();
+  assert.equal(h.events.filter(e=>e.payload?.type==='register').length,2);
+  const stopped=await h.request(11,'network:stop');
+  assert.equal(stopped.ok,true);
+  assert.equal(h.sockets[1].closed,true);
+  await h.alarm();
+  assert.equal(h.sockets.length,2,'inactive agent never reconnects');
+});
+
+test('owner handover closes previous WebSocket before creating new one',async()=>{
+  const h=networkHarness({urls:[PROJECT,PLAIN],socketStartsOpen:false});
+  await h.start(10);
+  h.sockets[0].open();
+  await h.tick();
+  await h.close(10);
+  assert.equal(h.sockets[0].closed,true);
+  assert.equal(h.sockets.length,2);
+  h.sockets[1].open();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].ownerTabId,11);
+  assert.equal(h.events.filter(e=>e.payload?.type==='register').length,2);
+  await h.alarm();
+  assert.equal(h.sockets.length,2);
+});
+
+
+test('periodic ping stops when the agent is stopped',async()=>{
+  const h=networkHarness({urls:[PLAIN],socketStartsOpen:false});
+  await h.start(10);
+  h.sockets[0].open();
+  await h.tick();
+  await h.ping();
+  assert.equal(h.events.filter(e=>e.payload?.type==='ping').length,1);
+  assert.equal(h.events.filter(e=>e.payload?.type==='ping')[0].payload.state,'idle');
+  await h.request(10,'network:stop');
+  await h.ping();
+  assert.equal(h.events.filter(e=>e.payload?.type==='ping').length,1);
+});
+
+test('service worker restart resumes bound agent without registering a new identity',async()=>{
+  const h=networkHarness({urls:[PLAIN]});
+  await h.start(10);
+  const persisted=structuredClone(h.data.agentsByChat);
+  const restarted=networkHarness({urls:[PROJECT],initial:persisted,socketStartsOpen:false});
+  await restarted.tick();
+  assert.equal(restarted.registrations,0);
+  assert.equal(restarted.sockets.length,1);
+  assert.equal(restarted.data.agentsByChat[PLAIN].agentId,persisted[PLAIN].agentId);
+  restarted.sockets[0].open();
+  await restarted.tick();
+  const registrations=restarted.events.filter(e=>e.payload?.type==='register');
+  assert.equal(registrations.length,1);
+  assert.equal(registrations[0].payload.agent_id,persisted[PLAIN].agentId);
+  assert.equal(restarted.events.filter(e=>e.type==='agent:send').length,0);
+});
+
+test('two overlapping per-tab server preference writes do not lose updates',async()=>{
+  const h=networkHarness({urls:[]});
+  const a=vm.runInContext(
+    "updateServerPreferences(data => { data.serverByTab[10]='https://a.example'; })",h.context);
+  const b=vm.runInContext(
+    "updateServerPreferences(data => { data.serverByTab[11]='https://b.example'; })",h.context);
+  await Promise.all([a,b]);
+  assert.equal(h.data.serverByTab[10],'https://a.example');
+  assert.equal(h.data.serverByTab[11],'https://b.example');
 });

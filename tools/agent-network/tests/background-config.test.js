@@ -20,10 +20,10 @@ function createBackground() {
     storage: {local:{
       async get(keys) {
         if (Array.isArray(keys))
-          return Object.fromEntries(keys.filter(k => k in data).map(k => [k,data[k]]));
-        return typeof keys === 'string' ? {[keys]:data[keys]} : data;
+          return Object.fromEntries(keys.filter(k => k in data).map(k => [k,structuredClone(data[k])]));
+        return typeof keys === 'string' ? {[keys]:structuredClone(data[keys])} : structuredClone(data);
       },
-      async set(update) {Object.assign(data,update);},
+      async set(update) {Object.assign(data,structuredClone(update));},
       async remove(key){delete data[key];}
     }}
   };

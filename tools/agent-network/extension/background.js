@@ -33,6 +33,20 @@ async function serverForTab(tabId, record = null) {
     record?.server || data.serverByTab?.[tabId] || data.defaultServer || DEFAULT_SERVER
   );
 }
+// Tab-specific server preferences also use copy-on-read Chrome Storage.
+// Navigation/close handlers may overlap a popup server change.
+let serverWriteQueue=Promise.resolve();
+function updateServerPreferences(mutator) {
+  const operation=serverWriteQueue.catch(()=>{}).then(async()=>{
+    const data=await chrome.storage.local.get(['serverByTab','defaultServer']);
+    const next={serverByTab:{...(data.serverByTab||{})}};
+    if(data.defaultServer!==undefined) next.defaultServer=data.defaultServer;
+    mutator(next);
+    await chrome.storage.local.set(next);
+  });
+  serverWriteQueue=operation.catch(()=>{});
+  return operation;
+}
 async function setServer(tabId, raw) {
   const url = normalizeServer(raw);
   const {key,entries,record} = await currentRecord(tabId);
@@ -45,10 +59,9 @@ async function setServer(tabId, raw) {
       if (records[key]?.agentId === record.agentId) delete records[key];
     }); // Never use an agent token on a different server.
   }
-  const data = await chrome.storage.local.get('serverByTab');
-  await chrome.storage.local.set({
-    serverByTab:{...(data.serverByTab || {}), [tabId]:url},
-    defaultServer:url,
+  await updateServerPreferences(data=>{
+    data.serverByTab[tabId]=url;
+    data.defaultServer=url;
   });
   return {server:url,changed:before!==url};
 }
@@ -275,8 +288,16 @@ async function connectOwned(tabId, record) {
     return {...records[key]};
   });
   if (!saved) return;
-  const liveRecord = {...saved, chatUrl:tab.url};
-  const ws = new WebSocket(socketUrl(saved.server || await serverForTab(tabId,saved)));
+  const server=saved.server || await serverForTab(tabId,saved);
+  // The owner can navigate or Stop while the URL/server/storage awaits finish.
+  // Check the live tab and binding immediately before creating a socket.
+  const latestTab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
+  const latest=(await storage())[key];
+  if (chatKey(latestTab?.url)!==key || !latest?.active ||
+      latest.agentId!==saved.agentId || Number(latest.ownerTabId)!==Number(tabId))
+    return;
+  const liveRecord = {...latest, chatUrl:latestTab.url};
+  const ws = new WebSocket(socketUrl(server));
   const connection = {socket:ws, interval:null, key};
   connections.set(Number(tabId), connection);
   ws.onopen = async () => {
@@ -615,10 +636,18 @@ async function startAgent(tabId, profile) {
   );
   return operation;
 }
+async function conversationTab(tabId, expectedKey) {
+  const tab = await chrome.tabs.get(Number(tabId)).catch(() => null);
+  if (!tab || chatKey(tab.url) !== expectedKey)
+    throw Error('Чат изменился во время регистрации. Вернитесь в исходную беседу и повторите Старт.');
+  return tab;
+}
+
 async function registerConversation(tabId, profile) {
-  const {tab,key,entries,record:old}=await currentRecord(tabId);
+  const {key,record:old}=await currentRecord(tabId);
   if (!key) throw Error('Conversation changed; open the ChatGPT conversation again');
   const server=await serverForTab(tabId,old);
+  const wasActive=!!old?.active;
   let record=old;
   if (record && (record.server || DEFAULT_SERVER)!==server)
     throw Error('Agent belongs to a different server. Stop and select a new server first.');
@@ -632,8 +661,7 @@ async function registerConversation(tabId, profile) {
         agent_id:record.agentId,token:record.token,
         role:profile.role,purpose:profile.purpose,description:profile.description,
       });
-      record={...record,...profile,active:true};
-      if (!old.active) record.ownerTabId=tabId; // explicit new Start picks the owner
+      record={...record,...profile};
     } catch(error) {
       if(error.status===400 && String(error.message).includes('Unknown agent_id')) {
         disconnect(record.ownerTabId);
@@ -647,34 +675,76 @@ async function registerConversation(tabId, profile) {
     });
     record={
       ...profile,agentId:result.agent.agent_id,token:result.token,
-      chatUrl:key,ownerTabId:tabId,server,active:true,bootstrapDone:false,
+      chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
     };
     created=true;
   }
-  const actualTab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
-  const sameChat=chatKey(actualTab?.url)===key;
-  if (!sameChat && created) record={...record,active:false,bootstrapDone:false};
-  if (sameChat || created) {
-    await updateRecords(records=>{ records[key]=record; });
-  }
-  if (!sameChat) throw Error(
-    'Чат изменился во время регистрации. Вернитесь в исходную беседу и повторите Старт.'
-  );
 
-  // Registration controls agent identity only. The floating HUD is never
-  // shown automatically; the popup has a separate explicit Show button.
-  await connect(tabId,record);
-
-  if (!record.bootstrapDone) {
-    const bootstrap=bootstrapPrompt(record);
-    const sent=await askTab(tabId,{type:'agent:send',text:bootstrap,url:tab.url});
-    if(!sent?.ok) throw Error('Registered, but initialization prompt was not sent: '+(sent?.error||'unknown'));
-    record.bootstrapDone=true;
-    await updateRecords(records=>{
-      if (records[key]?.agentId===record.agentId) records[key].bootstrapDone=true;
+  // Persist a newly issued identity before any further awaits, but do not
+  // activate it until the bootstrap was delivered to its original conversation.
+  // Failed or abandoned registration can then be safely resumed on next Start.
+  try {
+    await conversationTab(tabId,key);
+  } catch(error) {
+    if(created) await updateRecords(entries=>{
+      if(!entries[key] || entries[key].agentId===old?.agentId)
+        entries[key]={...record,active:false,ownerTabId:null,bootstrapDone:false};
     });
+    throw error;
   }
-  return {agentId:record.agentId,name:record.name,created};
+
+  await updateRecords(entries=>{
+    if(old && entries[key]?.agentId!==old.agentId)
+      throw Error('Agent binding changed during registration');
+    if(!old && entries[key])
+      throw Error('Conversation was bound to another agent during registration');
+    entries[key]={
+      ...record,active:wasActive && !created,
+      ownerTabId:wasActive && !created ? old.ownerTabId : null,
+    };
+  });
+
+  try {
+    if (!record.bootstrapDone) {
+      const tab=await conversationTab(tabId,key);
+      const sent=await askTab(tabId,{
+        type:'agent:send',text:bootstrapPrompt(record),url:tab.url,
+      });
+      if(!sent?.ok)
+        throw Error('Registered, but initialization prompt was not sent: '+(sent?.error||'unknown'));
+      await conversationTab(tabId,key); // Navigation can happen while send() awaits.
+      record={...record,bootstrapDone:true};
+      await updateRecords(entries=>{
+        if(entries[key]?.agentId!==record.agentId)
+          throw Error('Agent binding changed during bootstrap');
+        entries[key].bootstrapDone=true;
+      });
+    }
+
+    await conversationTab(tabId,key);
+    record=await updateRecords(entries=>{
+      if(entries[key]?.agentId!==record.agentId)
+        throw Error('Agent binding changed during activation');
+      entries[key].active=true;
+      if(!wasActive || created) entries[key].ownerTabId=Number(tabId);
+      return {...entries[key]};
+    });
+    await connect(tabId,record);
+    await conversationTab(tabId,key);
+    return {agentId:record.agentId,name:record.name,created};
+  } catch(error) {
+    if(!wasActive || created) {
+      // Do not leave an uninitialized or abandoned agent active. In
+      // particular, a late send response must never resurrect a moved tab.
+      await updateRecords(entries=>{
+        if(entries[key]?.agentId!==record.agentId) return;
+        entries[key].active=false;
+        entries[key].ownerTabId=null;
+      });
+      disconnect(tabId);
+    }
+    throw error;
+  }
 }
 async function stopAgent(tabId) {
   const {key,record}=await currentRecord(tabId);
@@ -747,10 +817,9 @@ chrome.tabs.onRemoved.addListener(tabId => {
           record.ownerTabId=null;
       }
     });
-    const data=await chrome.storage.local.get('serverByTab');
-    const servers=data.serverByTab || {};
-    delete servers[tabId];
-    await chrome.storage.local.set({serverByTab:servers});
+    await updateServerPreferences(data=>{
+      delete data.serverByTab[tabId];
+    });
     // The same conversation can still be open in another tab.
     await resumeAll();
   })().catch(error=>console.warn('Agent Network tab cleanup:',String(error)));

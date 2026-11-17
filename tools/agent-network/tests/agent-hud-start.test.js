@@ -53,10 +53,10 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
     },
     storage:{local:{
       async get(key) {
-        if(Array.isArray(key))return Object.fromEntries(key.filter(k=>k in data).map(k=>[k,data[k]]));
-        return {[key]:data[key]};
+        if(Array.isArray(key))return Object.fromEntries(key.filter(k=>k in data).map(k=>[k,structuredClone(data[k])]));
+        return {[key]:structuredClone(data[key])};
       },
-      async set(update){Object.assign(data,update);},
+      async set(update){Object.assign(data,structuredClone(update));},
       async remove(key){delete data[key];}
     }},
   };

@@ -50,9 +50,9 @@ function createWorker() {
     storage:{local:{
       async get(keys) {
         if(Array.isArray(keys)) return Object.fromEntries(keys.filter(key=>key in data).map(key=>[key,data[key]]));
-        return {[keys]:data[keys]};
+        return {[keys]:structuredClone(data[keys])};
       },
-      async set(update){Object.assign(data,update);},
+      async set(update){Object.assign(data,structuredClone(update));},
       async remove(key){delete data[key];}
     }}
   };
