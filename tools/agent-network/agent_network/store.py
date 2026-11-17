@@ -524,6 +524,35 @@ class Store:
                 "next_cursor": page[-1]["message_id"] if has_more else None,
             }
 
+    def agent_conversations(self, agent_id: str, token: str) -> dict:
+        """Peer list limited to the caller's own conversations, authenticated."""
+        with self.lock:
+            self.verify(agent_id, token)
+            return self.conversations(agent_id)
+
+    def agent_conversation_messages(
+        self, agent_id: str, token: str, peer_id: str,
+        *, before: str = "", limit: int = 30,
+    ) -> dict:
+        """Read ONLY messages exchanged by this authenticated agent and peer.
+
+        An unrelated peer is not enumerable; a cursor cannot escape its pair.
+        Reading does not touch presence, consume messages or acknowledge them.
+        """
+        with self.lock:
+            self.verify(agent_id, token)
+            if not self.db.execute(
+                "SELECT 1 FROM messages WHERE created_at > ? AND "
+                "((sender_id=? AND recipient_id=?) OR "
+                " (sender_id=? AND recipient_id=?)) LIMIT 1",
+                (now() - MESSAGE_TTL_SECONDS,
+                 agent_id, peer_id, peer_id, agent_id),
+            ).fetchone():
+                raise ValueError("Conversation not found")
+            return self.conversation_messages(
+                agent_id, peer_id, before=before, limit=limit
+            )
+
     def enable_dashboard(self, name: str, agent_id: str = "", token: str = "") -> dict:
         result = self.register(
             name=name, role="Dashboard operator", kind="dashboard",

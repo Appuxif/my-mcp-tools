@@ -64,10 +64,33 @@ function createWorker() {
     importScripts(){},
     fetch:async (url,options)=>{
       requests++;
-      assert.equal(url,'http://127.0.0.1:8787/api/v1/agents/hud');
+      const parsed=new URL(url);
       const id=options.headers['X-Agent-Id'];
       assert.equal(options.headers['X-Agent-Token'],
         id==='agent-A'?'AGENT_SECRET':'SECOND_SECRET');
+      assert.ok(parsed.pathname.startsWith('/api/v1/agents/'));
+      if (parsed.pathname === '/api/v1/agents/conversations') return {
+        ok:true,async json(){return {
+          agent_id:id,items:[{
+            peer_id:id==='agent-A'?'agent-B':'agent-A',
+            peer_name:id==='agent-A'?'beta':'alpha',
+            message_count:2,pending_for_agent:1
+          }]
+        }}
+      };
+      if (parsed.pathname.startsWith('/api/v1/agents/conversations/')) {
+        const peer=parsed.pathname.split('/')[5];
+        if(peer !== (id==='agent-A'?'agent-B':'agent-A'))
+          return {ok:false,status:404,async json(){return {detail:'Conversation not found'}}};
+        return {ok:true,async json(){return {
+          agent_id:id,peer_id:peer,items:[{
+            message_id:'m1',sender_id:id,recipient_id:peer,
+            sender_name:id==='agent-A'?'alpha':'beta',
+            body:'SCOPED_PRIVATE_CHAT',created_at:100,status:'pending'
+          }],has_more:false,next_cursor:null
+        }}};
+      }
+      assert.equal(parsed.pathname,'/api/v1/agents/hud');
       const agent=snapshot.agents.find(a=>a.agent_id===id);
       const others=snapshot.agents.filter(a=>a.agent_id!==id)
         .map(a=>({agent_id:a.agent_id,name:a.name}));
@@ -135,4 +158,51 @@ test('different agents fetch separate scoped views and cache repeated calls',asy
   assert.equal(a.status.name,'alpha');
   assert.equal(b.status.name,'beta');
   assert.equal(b.status.pending,9);
+});
+
+test('HUD conversation requests use ONLY the sender-tab identity, never a requested agent ID',async()=>{
+  const bg=createWorker();
+  const sender={tab:{id:10,url:chatA},frameId:0};
+  const list=await bg.request({type:'network:hud-conversations',tabId:20,agentId:'agent-B'},sender);
+  assert.equal(list.ok,true);
+  assert.equal(list.agent_id,'agent-A');
+  assert.deepEqual(Array.from(list.items.map(x=>x.peer_id)),['agent-B']);
+  const history=await bg.request({type:'network:hud-messages',peerId:'agent-B',
+                                  agentId:'agent-B',tabId:20,limit:30},sender);
+  assert.equal(history.ok,true);
+  assert.equal(history.agent_id,'agent-A');
+  assert.equal(history.items[0].body,'SCOPED_PRIVATE_CHAT');
+  assert.equal(JSON.stringify(history).includes('AGENT_SECRET'),false);
+});
+
+test('HUD chat requests reject unbound frames, unrelated peers and invalid cursors',async()=>{
+  const bg=createWorker();
+  const initial=bg.requests;
+  for(const sender of [
+    {tab:{id:10,url:chatA},frameId:1},
+    {tab:{id:404,url:chatA},frameId:0},
+    {tab:{id:10,url:chatB},frameId:0},
+    {tab:{id:10,url:'https://evil.example/c/aaa'},frameId:0},
+  ]) {
+    const out=await bg.request({type:'network:hud-conversations'},sender);
+    assert.equal(out.ok,false);
+  }
+  assert.equal(bg.requests,initial);
+  const sender={tab:{id:10,url:chatA},frameId:0};
+  for(const message of [
+    {type:'network:hud-messages',peerId:'../admin'},
+    {type:'network:hud-messages',peerId:'agent-B',before:'?x=evil'},
+    {type:'network:hud-messages',peerId:'agent-B',limit:51},
+  ]) {
+    const out=await bg.request(message,sender);
+    assert.equal(out.ok,false);
+  }
+  assert.equal(bg.requests,initial);
+  const other=await bg.request({type:'network:hud-messages',peerId:'agent-C'},sender);
+  assert.equal(other.ok,false);
+  assert.match(other.error,/Conversation not found/);
+  bg.pages[10].url=chatB;
+  const stale=await bg.request({type:'network:hud-messages',peerId:'agent-B'},sender);
+  assert.equal(stale.ok,false);
+  assert.match(stale.error,/tab has changed/);
 });

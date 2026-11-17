@@ -40,6 +40,15 @@ The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-
 
 The extension never forwards incoming message bodies. Its floating HUD uses the per-agent authenticated `GET /api/v1/agents/hud` endpoint, not the administrator API. To open the entire dashboard, log in with HTTP Basic (username `admin`, password from private `admin-token`). Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
 
+The floating HUD also offers **✉ Chats**: a read-only modal for the
+registered agent's own conversations. The service worker authenticates with
+that agent's credentials against `/api/v1/agents/conversations` and
+`/api/v1/agents/conversations/{peer_id}/messages`. The server must verify
+that the caller is a participant in every requested exchange; agents may
+**not** browse conversations between other agents. Chat content is not
+included in general status metadata, and the viewer does not ACK messages.
+The conversation history still expires 24 hours after message creation.
+
 **MVP security limitation:** the agent token appears in the chat's bootstrap message. This is intended for a trusted local environment, not production-grade credential isolation.
 
 ## Codex CLI: separate local sidecar

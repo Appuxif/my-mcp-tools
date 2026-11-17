@@ -15,18 +15,36 @@ function createPage(registered=true) {
   const preferences={};
   let appended=null;
   const els=new Map();
-  const newElement=()=>({
-    hidden:false,style:{},dataset:{},textContent:'',title:'',className:'',
-    attributes:{},listeners:{},
-    setAttribute(name,value){this.attributes[name]=value;},
+  const newElement=(tag='div')=>({
+    tagName:tag.toUpperCase(),id:'',hidden:false,style:{},dataset:{},
+    _text:'',title:'',className:'',children:[],listeners:{},attributes:{},
+    set textContent(v){this._text=String(v);this.children=[];},
+    get textContent(){return this._text+this.children.map(c=>c.textContent).join('');},
+    setAttribute(name,value){this.attributes[name]=String(value);},
     addEventListener(name,cb){this.listeners[name]=cb;},
+    append(...items){this.children.push(...items);},
+    prepend(...items){this.children.unshift(...items);},
+    replaceChildren(...items){this._text='';this.children=[...items];},
+    focus(){this.focused=true;},
+    querySelectorAll(){return [];},
+    get scrollHeight(){
+      return this.id==='chat-scroll'
+        ? (els.get('chat-bubbles')?.children.length||0)*110+50
+        : this.children.length*110;
+    },
     getBoundingClientRect(){return {left:1000,top:96,width:300,height:390};},
     attachShadow() {
       const root={
+        activeElement:null,
         getElementById(id){return els.get(id);},
+        addEventListener(name,callback){callbacks['shadow:'+name]=callback;},
         set innerHTML(html) {
-          for(const match of html.matchAll(/id="([^"]+)"/g))
-            els.set(match[1],newElement());
+          for(const match of html.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)){
+            const node=newElement();
+            node.id=match[1];
+            node.hidden=/\shidden(?:\s|>)/.test(match[0]);
+            els.set(match[1],node);
+          }
         }
       };
       return root;
@@ -49,7 +67,7 @@ function createPage(registered=true) {
   const location={href:chatUrl,pathname:'/c/aaa'};
   const document={
     readyState:'complete',body:{appendChild(el){appended=el;}},
-    createElement:()=>newElement(),
+    createElement:(tag)=>newElement(tag),
     addEventListener(name,fn){callbacks[name]=fn;}
   };
   const window={addEventListener(name,fn){callbacks[name]=fn;}};
@@ -59,6 +77,37 @@ function createPage(registered=true) {
       async sendMessage(msg) {
         requests.push(msg);
         if(msg.type==='network:hud-open-dashboard') return {ok:true};
+        if(msg.type==='network:hud-conversations') return {
+          ok:true,agent_id:'a',agent_name:'Chopper-Developer',
+          items:[
+            {peer_id:'b',peer_name:'Chopper-Reviewer',message_count:4,pending_for_agent:1},
+            {peer_id:'c',peer_name:'Another agent',message_count:1,pending_for_agent:0},
+          ]
+        };
+        if(msg.type==='network:hud-messages') {
+          if(msg.peerId==='c') return {
+            ok:true,agent_id:'a',peer_id:'c',items:[
+              {message_id:'c1',sender_id:'c',sender_name:'Another agent',
+                created_at:170,status:'pending',body:'Hello'}
+            ],has_more:false,next_cursor:null
+          };
+          if(msg.peerId!=='b')return {ok:false,error:'Unrelated conversation'};
+          return {
+            ok:true,agent_id:'a',peer_id:'b',
+            items:msg.before ? [
+              {message_id:'m1',sender_id:'a',sender_name:'Chopper-Developer',
+                created_at:100,status:'acknowledged',body:'Old outbound'},
+              {message_id:'m2',sender_id:'b',sender_name:'Chopper-Reviewer',
+                created_at:120,status:'pending',body:'Old inbound'},
+            ] : [
+              {message_id:'m3',sender_id:'b',sender_name:'Chopper-Reviewer',
+                created_at:200,status:'pending',body:'<img onerror=alert(1)>'},
+              {message_id:'m4',sender_id:'a',sender_name:'Chopper-Developer',
+                created_at:230,status:'acknowledged',body:'Review received'}
+            ],
+            has_more:!msg.before,next_cursor:msg.before?null:'m3'
+          };
+        }
         assert.equal(msg.type,'network:hud-status');
         return registered ? response : {ok:true,visible:false};
       }
@@ -78,7 +127,10 @@ function createPage(registered=true) {
   return {
     flush,els,preferences,requests,location,intervalCallbacks,
     get host(){return appended;},
-    click(id){els.get(id).listeners.click();}
+    click(id){els.get(id).listeners.click();},
+    clickPeer(index){els.get('chat-peers').children[index].listeners.click();},
+    scrollToTop(){els.get('chat-scroll').scrollTop=0;els.get('chat-scroll').listeners.scroll();},
+    async pressKey(key){callbacks['shadow:keydown']?.({key,preventDefault(){},stopPropagation(){},shiftKey:false});await flush();}
   };
 }
 
@@ -133,5 +185,53 @@ test('HUD disappears on single-page chat navigation',async()=>{
   page.location.pathname='/c/another-conversation';
   for(const callback of page.intervalCallbacks)callback();
   await page.flush();
+  assert.equal(page.host.hidden,true);
+});
+
+test('HUD chat button opens private read-only modal with peer list and message bubbles',async()=>{
+  const page=createPage();await page.flush();
+  page.click('messages');await page.flush();
+  assert.equal(page.els.get('chat-modal').hidden,false);
+  assert.equal(page.els.get('chat-title').textContent,'Chopper-Developer');
+  assert.equal(page.els.get('chat-peer-count').textContent,'2');
+  assert.equal(page.els.get('chat-peer-title').textContent,'Chopper-Reviewer');
+  const bubbles=page.els.get('chat-bubbles').children;
+  assert.equal(bubbles.length,2);
+  assert.ok(bubbles[0].className.includes('incoming'));
+  assert.ok(bubbles[1].className.includes('outgoing'));
+  assert.equal(bubbles[0].children[1].textContent,'<img onerror=alert(1)>');
+  assert.equal(page.els.get('chat-older').hidden,false);
+  assert.deepEqual(Array.from(page.requests.map(r=>r.type)),[
+    'network:hud-status','network:hud-conversations','network:hud-messages'
+  ]);
+  assert.equal(JSON.stringify(page.requests).includes('token'),false);
+  assert.equal(JSON.stringify(page.requests).includes('body'),false);
+});
+
+test('HUD chat scroll loads older messages without jumping and can switch peer',async()=>{
+  const page=createPage();await page.flush();page.click('messages');await page.flush();
+  page.scrollToTop();await page.flush();
+  const bubbles=page.els.get('chat-bubbles').children;
+  assert.equal(bubbles.length,4);
+  assert.equal(bubbles[0].children[1].textContent,'Old outbound');
+  assert.equal(page.els.get('chat-older').hidden,true);
+  assert.ok(page.els.get('chat-scroll').scrollTop>0);
+  page.clickPeer(1);await page.flush();
+  assert.equal(page.els.get('chat-peer-title').textContent,'Another agent');
+  assert.equal(page.els.get('chat-bubbles').children.length,1);
+  assert.equal(page.els.get('chat-bubbles').children[0].children[1].textContent,'Hello');
+});
+
+test('HUD modal closes on Escape and is dismissed on chat navigation',async()=>{
+  const page=createPage();await page.flush();page.click('messages');await page.flush();
+  await page.pressKey('Escape');
+  assert.equal(page.els.get('chat-modal').hidden,true);
+  assert.equal(page.els.get('chat-bubbles').children.length,0);
+  page.click('messages');await page.flush();
+  page.location.href='https://chatgpt.com/c/another-conversation';
+  page.location.pathname='/c/another-conversation';
+  for(const callback of page.intervalCallbacks)callback();
+  await page.flush();
+  assert.equal(page.els.get('chat-modal').hidden,true);
   assert.equal(page.host.hidden,true);
 });

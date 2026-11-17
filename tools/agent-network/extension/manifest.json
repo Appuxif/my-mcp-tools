@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Agent Network Wake",
-  "version": "0.2.0",
-  "description": "Attach ChatGPT agents to Agent Network, wake idle chats and show a floating per-agent status HUD.",
+  "version": "0.3.0",
+  "description": "ChatGPT Agent Network wake adapter with a floating status HUD and private per-agent conversation viewer.",
   "permissions": [
     "storage",
     "tabs",

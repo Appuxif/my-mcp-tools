@@ -232,6 +232,55 @@ async function hudStatus(sender) {
   }
 }
 
+async function hudConversationRequest(sender, peerId = null, before = '', limit = 30) {
+  // The caller cannot pick an agent_id or supply its token. Both come from the
+  // extension's own per-tab identity, never from page-controlled input.
+  const tabId = sender?.tab?.id;
+  if (tabId == null || sender.frameId !== 0 || !chatUrl(sender.tab?.url))
+    throw Error('Conversation viewer is only available to bound ChatGPT tabs');
+  const record = (await storage())[tabId];
+  if (!record?.agentId || !record?.token || record.chatUrl !== sender.tab.url)
+    throw Error('This conversation is not bound to an agent');
+  if (peerId !== null && (typeof peerId !== 'string' || peerId.length > 64 ||
+                          !/^[a-zA-Z0-9_-]+$/.test(peerId)))
+    throw Error('Invalid conversation peer');
+  if (typeof before !== 'string' || before.length > 64 ||
+      (before && !/^[a-zA-Z0-9_-]+$/.test(before)))
+    throw Error('Invalid message cursor');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50)
+    throw Error('Invalid page size');
+
+  const server = record.server || await serverForTab(tabId);
+  const suffix = peerId === null
+    ? '/api/v1/agents/conversations'
+    : '/api/v1/agents/conversations/' + encodeURIComponent(peerId) +
+      '/messages?limit=' + limit +
+      (before ? '&before=' + encodeURIComponent(before) : '');
+  const response = await fetch(server + suffix, {
+    method:'GET', cache:'no-store', signal:AbortSignal.timeout(8000),
+    headers:{
+      'Accept':'application/json',
+      'X-Agent-Id':record.agentId,
+      'X-Agent-Token':record.token,
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw Error(
+    response.status === 403 ? 'Agent credentials are invalid' :
+    data.detail || ('Conversation HTTP ' + response.status)
+  );
+  // Do not return a previous conversation's data if this tab changed mid-request.
+  const latest = await chrome.tabs.get(tabId);
+  const current = (await storage())[tabId];
+  if (latest?.url !== record.chatUrl || current?.agentId !== record.agentId ||
+      current.chatUrl !== record.chatUrl)
+    throw Error('The conversation tab has changed');
+  if (data.agent_id !== record.agentId ||
+      (peerId !== null && data.peer_id !== peerId))
+    throw Error('Unexpected conversation owner');
+  return data;
+}
+
 async function hudOpenDashboard(sender) {
   const tabId = sender?.tab?.id;
   if (tabId == null || sender.frameId !== 0 || !chatUrl(sender.tab?.url))
@@ -337,6 +386,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         };
       }
       case 'network:hud-status': return hudStatus(sender);
+      case 'network:hud-conversations': return hudConversationRequest(sender);
+      case 'network:hud-messages':
+        return hudConversationRequest(sender, message.peerId, message.before || '', message.limit || 30);
       case 'network:hud-open-dashboard': return hudOpenDashboard(sender);
       case 'network:start': return startAgent(message.tabId, message.profile);
       case 'network:stop': return stopAgent(message.tabId);

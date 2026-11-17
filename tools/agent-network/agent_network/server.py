@@ -431,6 +431,42 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(403, "Invalid agent credentials") from exc
         return JSONResponse(snapshot, headers={"Cache-Control":"no-store"})
 
+    def agent_view_credentials(req: Request) -> tuple[str, str]:
+        agent_id = req.headers.get("x-agent-id", "")
+        token = req.headers.get("x-agent-token", "")
+        try:
+            store.verify(agent_id, token)
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(403, "Invalid agent credentials") from exc
+        return agent_id, token
+
+    @app.get("/api/v1/agents/conversations")
+    def agent_conversations(req: Request) -> JSONResponse:
+        """Read-only peer list, scoped to this token's registered agent."""
+        agent_id, token = agent_view_credentials(req)
+        return JSONResponse(
+            store.agent_conversations(agent_id, token),
+            headers={"Cache-Control":"no-store"},
+        )
+
+    @app.get("/api/v1/agents/conversations/{peer_id}/messages")
+    def agent_conversation_messages(
+        peer_id: str, req: Request,
+        before: str = Query(default="", max_length=64),
+        limit: int = Query(default=30, ge=1, le=50),
+    ) -> JSONResponse:
+        """Only messages between token owner and peer; never arbitrary agent pairs."""
+        agent_id, token = agent_view_credentials(req)
+        try:
+            data = store.agent_conversation_messages(
+                agent_id, token, peer_id, before=before, limit=limit
+            )
+        except ValueError as exc:
+            if str(exc) == "Conversation not found":
+                raise HTTPException(404, "Conversation not found") from exc
+            raise HTTPException(400, str(exc)) from exc
+        return JSONResponse(data, headers={"Cache-Control":"no-store"})
+
     @app.get("/api/v1/health")
     def health() -> dict:
         return {"status": "ok", "agents": len(store.agents()),
