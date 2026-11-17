@@ -287,6 +287,10 @@
     chatsButton.hidden = !agent;
     chatsButton.disabled = !agent;
     chatsButton.dataset.agentId = agent?.agent_id || '';
+    const contextButton = $('open-agent-context');
+    contextButton.hidden = !agent;
+    contextButton.disabled = !agent;
+    contextButton.dataset.agentId = agent?.agent_id || '';
     if (!agent) {
       selectedId = null;
       if (inspectorView === null) return;

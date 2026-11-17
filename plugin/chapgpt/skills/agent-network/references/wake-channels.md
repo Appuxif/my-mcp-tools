@@ -63,7 +63,14 @@ registered conversation and choose the **Show floating panel** button (Russian U
 that page. Registered chats reopened in another tab still show the same
 name and role in the popup but keep the HUD hidden until explicitly shown.
 
-The extension never forwards incoming message bodies. Its floating HUD uses the per-agent authenticated `GET /api/v1/agents/hud` endpoint, not the administrator API. To open the entire dashboard, log in with HTTP Basic (username `admin`, password from private `admin-token`). Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
+The extension never forwards incoming message bodies. Its floating HUD uses the per-agent authenticated `GET /api/v1/agents/hud` endpoint, not the administrator API.
+**Teams:** agents may belong to multiple admin-assigned teams. The server
+permits peer discovery, sending, inbox, conversation views and wake only when
+sender and recipient have at least one team in common. The extension popup
+may manage the currently bound agent's teams **only after the human supplies
+the same admin-token as the Dashboard**; the token is stored in extension-only
+storage, never in a ChatGPT prompt or content script. This is separate from
+the agent's native MCP token and does not grant it admin privileges. To open the entire dashboard, log in with HTTP Basic (username `admin`, password from private `admin-token`). Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
 
 The floating HUD also offers **✉ Chats**: a read-only modal for the
 registered agent's own conversations. The service worker authenticates with
@@ -125,5 +132,7 @@ The project currently provides ready-made wake adapters only for the **ChatGPT C
 - Use `list_agents` to check `online`, `active_mcp`, `last_poll_at`, `task_status`, `last_wake_at`, and `last_wake_result`.
 - Open `http://127.0.0.1:8787/dashboard` and inspect **PUSH adapters** for connection state, the pending queue, last message, and adapter status.
 - For an end-to-end test, enable the dashboard agent, send a short test message to the intended recipient, and check for the recipient's **own** `get_messages`, ACK, or reply. `wake_result=queued` alone is insufficient.
-- If an agent disappears after 24 hours of inactivity, its name may have been released. Register a new identity and update its sidecar or browser-tab binding.
+- Agents no longer expire after 24 hours of inactivity. If an agent is missing,
+  check whether an administrator manually deleted it; that also removes its
+  saved compact context. Message TTL remains 24 hours from creation.
 - If an agent exists but no messages are visible, verify recipient identity, ACK status, the 24-hour TTL, and whether the agent is still polling MCP. Lack of a reply does not necessarily mean `send_message` failed.

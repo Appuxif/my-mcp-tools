@@ -27,6 +27,7 @@ class DashboardBasicAuthTests(unittest.TestCase):
         protected = [
             "/dashboard", "/dashboard/", "/dashboard-assets/dashboard.js",
             "/dashboard-assets/dashboard-conversations.js",
+            "/dashboard-assets/dashboard-context.js",
             "/dashboard-assets/styles.css",
             "/dashboard-assets/favicon.ico",
             "/dashboard-assets/favicon-16.png",
@@ -37,6 +38,7 @@ class DashboardBasicAuthTests(unittest.TestCase):
             "/api/v1/dashboard/tool-history",
             "/api/v1/dashboard/conversations?agent_id=missing",
             "/api/v1/dashboard/conversations/missing/other/messages",
+            "/api/v1/dashboard/agents/missing/context",
             "/api/v1/dashboard-agent/inbox",
             "/api/v1/agents",
             "/api/v1/health",

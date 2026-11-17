@@ -626,6 +626,16 @@ def create_app(config: Config | None = None) -> FastAPI:
             status = 404 if str(exc) == "Unknown agent_id" else 400
             raise HTTPException(status, str(exc)) from exc
 
+    @app.get("/api/v1/dashboard/agents/{target_agent_id}/context")
+    def dashboard_agent_context(target_agent_id: str, req: Request) -> JSONResponse:
+        """Administrator-only read of an agent's saved compact context."""
+        require_dashboard_admin(req)
+        try:
+            data = store.admin_read_context(target_agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Agent not found") from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/v1/dashboard/conversations")
     def dashboard_conversations(agent_id: str, req: Request) -> JSONResponse:
         """Administrator-only peer list. Never returns message content or tokens."""

@@ -100,6 +100,9 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
 test('Dashboard inspector assigns and removes team memberships via Basic-authenticated admin API',async()=>{
   const h=harness();await h.flush();
   let editor=h.get('inspector');
+  assert.equal(h.get('open-agent-context').dataset.agentId, 'A');
+  assert.equal(h.get('open-agent-context').disabled, false);
+  assert.equal(h.get('open-agent-context').hidden, false);
   assert.match(editor.textContent,/КОМАНДЫ АГЕНТА/);
   assert.match(editor.textContent,/default/);
   const addInput=h.find(editor,'team-editor-input');

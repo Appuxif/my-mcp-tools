@@ -886,6 +886,26 @@ class Store:
             )
             return {"saved": True, "updated_at": stamp, "bytes": size}
 
+    def admin_read_context(self, agent_id: str) -> dict:
+        """Read-only snapshot for the authenticated local Dashboard.
+
+        The HTTP handler must enforce admin auth; this does not update an
+        agent's activity or modify its saved context.
+        """
+        with self.lock:
+            agent = self._agent(agent_id)
+            row = self.db.execute(
+                "SELECT context,updated_at FROM agent_contexts WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            if row is None:
+                return {"agent_id": agent_id, "agent_name": agent["name"],
+                        "exists": False, "context": "", "updated_at": None, "bytes": 0}
+            return {"agent_id": agent_id, "agent_name": agent["name"],
+                    "exists": True, "context": row["context"],
+                    "updated_at": row["updated_at"],
+                    "bytes": len(row["context"].encode("utf-8"))}
+
     def read_context(self, agent_id: str, token: str) -> dict:
         """Read only the caller's durable summary; no message TTL applies."""
         self.touch_mcp(agent_id, token)

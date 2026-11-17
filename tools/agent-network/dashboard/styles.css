@@ -251,3 +251,29 @@ body.chat-open{overflow:hidden}
 .graph-team-option small{margin-left:auto;font-size:10px;color:#8196ac;flex:none}
 .graph-filter-hint{font-size:10px;color:#879bb1}
 @media(max-width:700px){.graph-team-filter{padding:0 15px 12px}.graph-team-select{min-width:150px}.graph-filter-hint{width:100%}}
+
+/* Administrator-only saved-context reader. Display text verbatim, never HTML. */
+.context-overlay{position:fixed;inset:0;z-index:10020;display:flex;justify-content:center;align-items:center;padding:24px}
+.context-overlay[hidden]{display:none}
+.context-backdrop{position:absolute;inset:0;background:#020812d9;backdrop-filter:blur(5px)}
+.context-dialog{position:relative;display:flex;flex-direction:column;max-width:1020px;width:100%;height:min(88dvh,930px);
+  min-height:260px;min-width:0;overflow:hidden;background:#0d1b2b;border:1px solid #38586e;
+  border-radius:15px;box-shadow:0 24px 80px #000b}
+.context-header{display:flex;justify-content:space-between;gap:18px;align-items:center;padding:19px 23px;border-bottom:1px solid var(--line)}
+.context-heading{min-width:0}.context-heading h3{font-size:21px;overflow-wrap:anywhere}.context-meta{font-size:11px;color:var(--muted);margin:6px 0 0;overflow-wrap:anywhere}
+.context-toolbar{padding:11px 22px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;border-bottom:1px solid #263c50;color:#9eb4cc;font-size:11px}
+.context-tools{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.context-wrap-label{display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap}
+.context-wrap-label input{accent-color:var(--cyan)}
+.context-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:20px 25px;background:#0a1522}
+.context-content{margin:0;max-width:none;color:#e2eaf5;font:13px/1.75 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;tab-size:4}
+.context-content.no-wrap{white-space:pre;overflow-wrap:normal;width:max-content;min-width:100%}
+.context-content.empty{color:#899eb4;font:13px/1.6 system-ui,sans-serif}
+.context-footer{padding:11px 22px;border-top:1px solid var(--line);color:#849bb2;font-size:10px}
+body.context-open{overflow:hidden}
+@media(max-width:700px){.context-overlay{padding:0}.context-dialog{height:100dvh;max-height:none;border-radius:0;border:0}.context-header{padding:16px}.context-toolbar{padding:10px 15px}.context-scroll{padding:14px}.context-content{font-size:12px}}
+
+/* Keep inspector actions usable in the narrow right-hand column. */
+.detail-panel .panel-heading{align-items:flex-start;flex-wrap:wrap;gap:10px}
+.detail-panel .inspector-actions{flex-wrap:wrap;row-gap:7px}

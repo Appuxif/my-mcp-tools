@@ -157,6 +157,18 @@ The selection survives the dashboard's three-second polling cycle without
 closing the team chooser. **Only the map is filtered**: server metrics, agent
 table, the inspector, and message history remain global administrator views.
 
+**Saved agent context:** select an agent and click **Контекст** in the inspector.
+A separate read-only window shows the full persisted compact summary
+verbatim, its last update timestamp and UTF-8 byte size. You can copy the
+text, toggle line wrapping, refresh the saved snapshot, or close with Escape.
+If no `save_context` call has occurred, the window explains that there is
+no saved context yet. The reader does not edit data or update agent activity.
+The endpoint `GET /api/v1/dashboard/agents/{agent_id}/context` is available
+**only with Dashboard HTTP Basic login** and returns `no-store` responses.
+There is no cross-agent MCP tool for this: `read_context` remains restricted
+to the requesting agent. Context data is intentionally omitted from the
+normal Dashboard snapshot and the extension HUD.
+
 Tables below show the agent pool, adapters and message events. Neither message
 bodies nor authentication tokens appear in the dashboard.
 
@@ -174,8 +186,8 @@ To view the password locally on the server, run
 startup with file mode 0600. Do not share, log, commit or send it to agents.
 
 Signing in once authorizes **all dashboard actions**: live map, agent pool,
-history, conversations with message bodies, deletion, and dashboard-agent
-controls. There are **no secondary password prompts** for Chats or Delete.
+history, conversations with message bodies, saved-context reading,
+team assignments, deletion, and dashboard-agent controls. There are **no secondary password prompts** for Chats or Delete.
 Browser HTTP Basic credentials are managed by the browser, not JavaScript or
 sessionStorage. Dashboard HTML, CSS/JS, API endpoints, tool/message history,
 health, API documentation, and the HTTP agent-list metadata require this login.

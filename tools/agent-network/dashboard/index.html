@@ -85,7 +85,7 @@
         <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>
       </article>
       <article class="panel detail-panel">
-        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="open-agent-chat" class="chat-open-button" type="button" disabled hidden title="Просмотреть переписки агента">Чаты</button><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить агента, сохранённый контекст и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
+        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="open-agent-chat" class="chat-open-button" type="button" disabled hidden title="Просмотреть переписки агента">Чаты</button><button id="open-agent-context" class="chat-open-button" type="button" disabled hidden title="Прочитать сохранённый контекст агента">Контекст</button><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить агента, сохранённый контекст и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
         <div id="inspector" class="inspector-body"><div class="inspector-placeholder"><span>⌁</span><strong>Выберите агента</strong><p>Нажмите на узел сети, чтобы изучить его состояние и активность.</p></div></div>
       </article>
     </section>
@@ -219,9 +219,38 @@
     </aside>
   </div>
 
+  <div id="context-overlay" class="context-overlay" hidden>
+    <div id="context-backdrop" class="context-backdrop" aria-hidden="true"></div>
+    <section id="context-dialog" class="context-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="context-title" tabindex="-1">
+      <header class="context-header">
+        <div class="context-heading">
+          <div class="section-overline">SAVED AGENT CONTEXT</div>
+          <h3 id="context-title">Сохранённый контекст</h3>
+          <p id="context-meta" class="context-meta">Контекст агента · только чтение</p>
+        </div>
+        <button id="context-close" class="chat-close" type="button" title="Закрыть контекст"
+          aria-label="Закрыть контекст">×</button>
+      </header>
+      <div class="context-toolbar">
+        <span id="context-status" role="status">Загрузка…</span>
+        <div class="context-tools">
+          <label class="context-wrap-label"><input id="context-wrap" type="checkbox" checked> Перенос строк</label>
+          <button id="context-refresh" class="chat-refresh" type="button">Обновить ↻</button>
+          <button id="context-copy" class="chat-refresh" type="button" disabled>Копировать</button>
+        </div>
+      </div>
+      <div id="context-scroll" class="context-scroll" tabindex="0">
+        <pre id="context-content" class="context-content"></pre>
+      </div>
+      <footer class="context-footer">Контекст сохраняется агентом через MCP save_context · просмотр не меняет данные</footer>
+    </section>
+  </div>
+
   <script src="/dashboard-assets/graph-utils.js" defer></script>
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
+  <script src="/dashboard-assets/dashboard-context.js" defer></script>
 </body>
 </html>

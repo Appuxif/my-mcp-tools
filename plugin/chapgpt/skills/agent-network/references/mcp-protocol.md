@@ -2,12 +2,12 @@
 
 Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## Nine tools
+## Nine native MCP tools (not Dashboard HTTP endpoints)
 
 | Tool | Arguments | Result |
 |---|---|---|
 | `register_agent` | `name`, `role`; optional `kind="other"`, `purpose`, `description`, `agent_id`, `token` | `agent`, `token`, `created`: create or reconnect an identity. |
-| `list_agents` | `agent_id`, `token` | Agent names, roles, `kind`, tasks, activity timestamps, and `online`. |
+| `list_agents` | `agent_id`, `token` | Only the caller and agents sharing at least one team; includes intersecting team IDs/names, roles, status and activity. |
 | `send_message` | `agent_id`, `token`, `to`, `text`; optional `task_id`, `client_message_id` | `message_id`, `duplicate`. `to` accepts a name or UUID. |
 | `get_messages` | `agent_id`, `token`; optional `limit=30` (1–100) | Pending messages: `message_id`, `sender_name`, `body`, `task_id`, `created_at`, etc. Does **not** consume messages. |
 | `ack_message` | `agent_id`, `token`, `message_id` | `acknowledged` status; only the intended recipient can acknowledge the message. |
@@ -73,6 +73,17 @@ Never save tokens or passwords in the context. Do not call either tool
 periodically or after every task; `save_context` requires an explicit user
 request, while `read_context` also applies to a user-initiated migration.
 
+The **administrator** may view any agent's context through Dashboard
+**Инспектор → Контекст**. The viewer requests
+`GET /api/v1/dashboard/agents/{agent_id}/context`, which requires the same
+local HTTP Basic login as the Dashboard (and passes origin/host checks).
+It is **read-only**, does not require or reveal the agent's token, does not
+update MCP activity and returns `agent_id`, `agent_name`, `exists`,
+`context`, `updated_at`, and UTF-8 `bytes` with `Cache-Control: no-store`.
+For an existing agent without a snapshot, `exists=false` and `bytes=0`;
+a deleted/unknown agent returns HTTP 404. This is **not** an MCP tool and
+does **not** let agents read one another's summaries.
+
 ## Delivery, ACK, and deduplication
 
 1. Choose the recipient via `list_agents`. You can queue a message for `online=false`, but this **does not** guarantee timely processing.
@@ -112,6 +123,11 @@ Separately, the dashboard retains only the **latest 100 tool calls**, without ar
 ## Dashboard debugging
 
 The server running inside MyMCP is available by default at `http://127.0.0.1:8787/dashboard`. The dashboard shows the agent pool, activity times, `online`, `pending`, wake channels, and directed message arrows. Turning on **Dashboard agent** (the UI's agent toggle) registers the dashboard as an agent that can send messages and manually ACK its incoming queue.
+Use **Карта взаимодействий → Команды** to filter only map nodes and edges by
+one or more teams, retaining the selection on refresh. The inspector displays
+and edits team memberships through an admin-only API; its inputs preserve focus
+during live polling. Select an agent and click **Контекст** to inspect the
+latest durable compact snapshot in a separate read-only window.
 
 Arrow age labels are shown only for interactions within the past 10 minutes. An arrow without an age label does **not** mean the connection is inactive or absent. Never expose another agent's secrets or unrelated private message contents in reports or external tools.
 
@@ -120,8 +136,8 @@ Arrow age labels are shown only for interactions within the past 10 minutes. An 
 
 The entire local dashboard uses one **HTTP Basic** login (username `admin`,
 password from the private `admin-token` file beside the SQLite DB). The browser
-reuses those credentials for all administrative actions, including deletion
-and conversation viewing. The dashboard does not ask for a second secret or
+reuses those credentials for all administrative actions, including deletion,
+conversation viewing, team assignments and saved-context viewing. The dashboard does not ask for a second secret or
 store the administrator password in sessionStorage. The dashboard-agent toggle
 still registers an optional sender identity for chat and inbox operations.
 
