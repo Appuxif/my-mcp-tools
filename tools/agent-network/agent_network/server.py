@@ -6,6 +6,8 @@ agents call MCP directly; adapters only report UI state and receive wake hints.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import functools
 import os
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
@@ -353,6 +355,82 @@ def create_app(config: Config | None = None) -> FastAPI:
     app.state.mcp = mcp
     app.state.admin_token_file = admin_token_path
 
+    def is_admin_route(path: str, method: str) -> bool:
+        return (
+            path.rstrip("/") == "/dashboard"
+            or path.startswith("/dashboard-assets/")
+            or path.startswith("/api/v1/dashboard")
+            or (path == "/api/v1/agents" and method == "GET")
+            or path == "/api/v1/health"
+            or path in ("/docs", "/redoc", "/openapi.json")
+        )
+
+    def admin_authenticated(req: Request) -> bool:
+        """HTTP Basic: admin / password from the existing private admin-token file."""
+        if (req.url.hostname or "").lower() not in ("localhost", "127.0.0.1", "::1"):
+            return False
+        if not req.client or req.client.host not in (
+            "localhost", "127.0.0.1", "::1", "testclient"
+        ):
+            return False
+        raw = req.headers.get("authorization", "")
+        prefix, _, encoded = raw.partition(" ")
+        if prefix.lower() != "basic" or not encoded or len(encoded) > 512:
+            return False
+        try:
+            decoded = base64.b64decode(encoded, validate=True).decode("utf-8")
+            username, password = decoded.split(":", 1)
+        except (ValueError, UnicodeError, binascii.Error):
+            return False
+        return (
+            secrets.compare_digest(username, "admin")
+            and secrets.compare_digest(password, admin_token)
+        )
+
+    @app.middleware("http")
+    async def dashboard_basic_auth(req: Request, call_next):
+        if is_admin_route(req.url.path, req.method):
+            # Authentication precedes access to every dashboard resource and API.
+            if not admin_authenticated(req):
+                return Response(
+                    status_code=401,
+                    headers={
+                        "WWW-Authenticate":
+                            'Basic realm="Agent Network Dashboard", charset="UTF-8"',
+                        "Cache-Control":"no-store",
+                        "X-Content-Type-Options":"nosniff",
+                    },
+                )
+            # CSRF protection for admin operations; origin isn't enough for auth.
+            origin = req.headers.get("origin")
+            expected = f"{req.url.scheme}://{req.headers.get('host', '')}"
+            site = req.headers.get("sec-fetch-site", "")
+            if (origin and origin != expected) or site not in (
+                "", "same-origin", "none"
+            ):
+                return Response(status_code=403,
+                                headers={"Cache-Control":"no-store"})
+            response = await call_next(req)
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            response.headers["Referrer-Policy"] = "no-referrer"
+            return response
+        return await call_next(req)
+
+    @app.get("/api/v1/agents/hud")
+    def agent_hud(req: Request) -> JSONResponse:
+        """Agent-scoped metadata for extension HUD; never Basic/admin access."""
+        agent_id = req.headers.get("x-agent-id", "")
+        token = req.headers.get("x-agent-token", "")
+        try:
+            snapshot = store.agent_hud_snapshot(
+                agent_id, token,
+                present_ids={x[0] for x in broker.connections.values()},
+            )
+        except (ValueError, PermissionError) as exc:
+            raise HTTPException(403, "Invalid agent credentials") from exc
+        return JSONResponse(snapshot, headers={"Cache-Control":"no-store"})
+
     @app.get("/api/v1/health")
     def health() -> dict:
         return {"status": "ok", "agents": len(store.agents()),
@@ -402,27 +480,46 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(403, str(exc)) from exc
         return agent_id, token
 
+    def require_dashboard_admin(req: Request) -> None:
+        """All dashboard paths are already protected by HTTP Basic middleware."""
+        require_dashboard_origin(req)
+        if not admin_authenticated(req):
+            raise HTTPException(
+                401, "Administrator authentication required",
+                headers={"WWW-Authenticate":'Basic realm="Agent Network Dashboard"'},
+            )
+
+    @app.get("/api/v1/dashboard/conversations")
+    def dashboard_conversations(agent_id: str, req: Request) -> JSONResponse:
+        """Administrator-only peer list. Never returns message content or tokens."""
+        require_dashboard_admin(req)
+        try:
+            data = store.conversations(agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/dashboard/conversations/{agent_id}/{peer_id}/messages")
+    def dashboard_conversation_messages(
+        agent_id: str, peer_id: str, req: Request,
+        before: str = Query(default="", max_length=64),
+        limit: int = Query(default=30, ge=1, le=50),
+    ) -> JSONResponse:
+        """Administrator-only, read-only chat history with a stable older cursor."""
+        require_dashboard_admin(req)
+        try:
+            data = store.conversation_messages(agent_id, peer_id,
+                                               before=before, limit=limit)
+        except ValueError as exc:
+            if "Unknown agent_id" in str(exc):
+                raise HTTPException(404, str(exc)) from exc
+            raise HTTPException(400, str(exc)) from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
     @app.delete("/api/v1/dashboard/agents/{target_agent_id}")
     async def dashboard_delete_agent(target_agent_id: str, req: Request) -> dict:
-        """Local dashboard administration; no agent registration required.
-
-        Unlike messaging, deletion is a dashboard administrative action. It is
-        only available on the loopback listener, with the existing same-origin
-        browser checks. Never expose this endpoint through a public proxy.
-        The UI requires explicit confirmation before calling it.
-        """
-        require_dashboard_origin(req)
-        host = (req.url.hostname or "").lower()
-        peer = req.client.host if req.client else ""
-        if host not in ("localhost", "127.0.0.1", "::1") or peer not in (
-            "localhost", "127.0.0.1", "::1", "testclient"
-        ):
-            raise HTTPException(
-                403, "Agent deletion is available only on the local dashboard"
-            )
-        supplied = req.headers.get("x-admin-token", "")
-        if not supplied or not secrets.compare_digest(supplied, admin_token):
-            raise HTTPException(401, "Administrator token required")
+        """Delete an identity and its messages with explicit administrator auth."""
+        require_dashboard_admin(req)
         try:
             result = store.delete_agent(target_agent_id)
         except ValueError as exc:

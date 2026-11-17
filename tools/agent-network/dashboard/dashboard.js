@@ -202,6 +202,10 @@
     deleteButton.disabled = !agent;
     deleteButton.dataset.agentId = agent?.agent_id || '';
     deleteButton.dataset.agentName = agent?.name || '';
+    const chatsButton = $('open-agent-chat');
+    chatsButton.hidden = !agent;
+    chatsButton.disabled = !agent;
+    chatsButton.dataset.agentId = agent?.agent_id || '';
     if (!agent) {
       selectedId = null;
       el.replaceChildren();

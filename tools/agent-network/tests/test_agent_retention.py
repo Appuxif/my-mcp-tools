@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from agent_network.server import Config, create_app
 from agent_network.store import MESSAGE_TTL_SECONDS, Store
+from auth_helpers import basic_headers
 
 
 class AgentRetentionTests(unittest.TestCase):
@@ -107,8 +108,8 @@ class AgentDeletionHttpTests(unittest.TestCase):
                                      wake_scan_seconds=.01, maintenance_seconds=.02))
         self.client_context = TestClient(self.app, base_url="http://127.0.0.1:8787")
         self.client = self.client_context.__enter__()
-        self.admin_token = Path(self.app.state.admin_token_file).read_text().strip()
-        self.admin_headers = {"X-Admin-Token": self.admin_token}
+        self.admin_headers = basic_headers(self.app)
+        self.client.headers.update(self.admin_headers)
 
     def tearDown(self):
         self.client_context.__exit__(None, None, None)
@@ -122,7 +123,7 @@ class AgentDeletionHttpTests(unittest.TestCase):
         url = "/api/v1/dashboard/agents/" + aid
 
         # Deletion is independent from the Dashboard Agent toggle/identity.
-        self.assertEqual(self.client.delete(url).status_code, 401)
+        self.assertEqual(self.client.delete(url, headers={"Authorization":""}).status_code, 401)
         self.assertEqual(self.client.delete(
             url, headers={"Origin": "https://evil.site", **self.admin_headers}
         ).status_code, 403)
@@ -131,10 +132,10 @@ class AgentDeletionHttpTests(unittest.TestCase):
         ).status_code, 403)
         self.assertEqual(self.client.delete(
             url, headers={"Host": "remote.example", **self.admin_headers}
-        ).status_code, 403)
+        ).status_code, 401)
 
         self.assertEqual(self.client.delete(
-            url, headers={"X-Admin-Token":"invalid"}
+            url, headers={"Authorization":"Basic invalid"}
         ).status_code,401)
         response = self.client.delete(url, headers=self.admin_headers)
         self.assertEqual(response.status_code, 200, response.text)

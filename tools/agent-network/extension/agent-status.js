@@ -52,7 +52,7 @@
       lastPoll: Number(agent.last_poll_at) || null,
       pending: Number(agent.pending_messages || 0),
       sent24h: sent,
-      sentCountIsLowerBound: (snapshot.edges || []).length >= 100,
+      sentCountIsLowerBound: !!snapshot.edgesTruncated || (snapshot.edges || []).length >= 100,
       lastOutbound: latestInteraction(snapshot, agentId, 'out'),
       lastInbound: latestInteraction(snapshot, agentId, 'in'),
       recent,

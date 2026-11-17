@@ -16,6 +16,7 @@ from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 from websockets.datastructures import Headers
 from agent_network.codex_state import detect_state, rollout_state
+from auth_helpers import basic_headers
 
 
 class StoreSafetyTests(unittest.TestCase):
@@ -206,7 +207,7 @@ class AdministrativeAndAuditTests(unittest.TestCase):
                         "params":{"name":"heartbeat",
                                   "arguments":{"agent_id":aid, "token":"wrong"}}})
                 self.assertTrue(res.json()["result"]["isError"])
-                audit=client.get("/api/v1/dashboard/tool-history").json()["items"]
+                audit=client.get("/api/v1/dashboard/tool-history", headers=basic_headers(app)).json()["items"]
                 self.assertEqual(audit[0]["status"],"error")
                 self.assertIsNone(audit[0]["agent_id"])
                 self.assertIsNone(audit[0]["agent_name"])

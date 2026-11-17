@@ -1,6 +1,8 @@
 """Test that the dashboard belongs to its MCP stdio process, not a service."""
 from __future__ import annotations
 
+import base64
+
 import asyncio
 import socket
 import sys
@@ -37,12 +39,18 @@ class StdioLifecycleTests(unittest.IsolatedAsyncioTestCase):
                     tools = await session.list_tools()
                     self.assertEqual(len(tools.tools), 7)
                     async with httpx.AsyncClient(timeout=3) as client:
+                        password=(Path(tmp)/"admin-token").read_text().strip()
+                        basic="Basic "+base64.b64encode(
+                            ("admin:"+password).encode()
+                        ).decode()
                         response = await client.get(
-                            f"http://127.0.0.1:{port}/dashboard"
+                            f"http://127.0.0.1:{port}/dashboard",
+                            headers={"Authorization":basic},
                         )
                         self.assertEqual(response.status_code, 200)
                         response = await client.get(
-                            f"http://127.0.0.1:{port}/api/v1/dashboard"
+                            f"http://127.0.0.1:{port}/api/v1/dashboard",
+                            headers={"Authorization":basic},
                         )
                         self.assertEqual(response.status_code, 200)
             # No HTTP process may survive after the stdio child has gone away.

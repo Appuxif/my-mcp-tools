@@ -87,6 +87,10 @@ class Store:
                   ON messages(recipient_id, status, created_at);
                 CREATE INDEX IF NOT EXISTS messages_expiration
                   ON messages(created_at);
+                CREATE INDEX IF NOT EXISTS messages_sender_time
+                  ON messages(sender_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS messages_recipient_time
+                  ON messages(recipient_id, created_at DESC);
                 -- Remove indexes used by the previous per-status retention policy.
                 DROP INDEX IF EXISTS pending_expiration;
                 DROP INDEX IF EXISTS acknowledged_by_recipient;
@@ -291,6 +295,75 @@ class Store:
                 },
             }
 
+    def agent_hud_snapshot(self, agent_id: str, token: str,
+                           *, present_ids: set[str] | None = None) -> dict:
+        """A token-scoped view for one agent's extension HUD.
+
+        Never return bodies, other agents' tasks/statuses, global audit,
+        or credentials. Does not poll the inbox or acknowledge messages.
+        """
+        cutoff = now() - MESSAGE_TTL_SECONDS
+        with self.lock:
+            own = self.verify(agent_id, token)
+            result = public_agent(own, present=agent_id in (present_ids or set()))
+            result["pending_messages"] = self.db.execute(
+                "SELECT count(*) FROM messages WHERE recipient_id=? "
+                "AND status='pending' AND created_at>?",
+                (agent_id, cutoff),
+            ).fetchone()[0]
+            edge_rows = self.db.execute(
+                "SELECT sender_id AS source,recipient_id AS target,"
+                "count(*) AS recent_count,"
+                "sum(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,"
+                "max(created_at) AS last_message_at "
+                "FROM messages WHERE created_at>? AND "
+                "(sender_id=? OR recipient_id=?) "
+                "GROUP BY sender_id,recipient_id "
+                "ORDER BY last_message_at DESC LIMIT 101",
+                (cutoff, agent_id, agent_id),
+            ).fetchall()
+            truncated = len(edge_rows) > 100
+            edges = [dict(r) for r in edge_rows[:100]]
+            peers = {agent_id}
+            for edge in edges:
+                peers.add(edge["source"])
+                peers.add(edge["target"])
+            names = [
+                {"agent_id":r["agent_id"], "name":r["name"]}
+                for r in self.db.execute(
+                    "SELECT agent_id,name FROM agents WHERE agent_id IN ("
+                    + ",".join("?" for _ in peers) + ")",
+                    tuple(peers),
+                ) if r["agent_id"] != agent_id
+            ]
+            recent = [
+                dict(r) for r in self.db.execute(
+                    "SELECT m.message_id,m.sender_id,s.name AS sender_name,"
+                    "m.recipient_id,r.name AS recipient_name,m.created_at,"
+                    "m.acknowledged_at,m.status "
+                    "FROM messages m JOIN agents s ON s.agent_id=m.sender_id "
+                    "JOIN agents r ON r.agent_id=m.recipient_id "
+                    "WHERE m.created_at>? AND "
+                    "(m.sender_id=? OR m.recipient_id=?) "
+                    "ORDER BY m.created_at DESC,m.rowid DESC LIMIT 10",
+                    (cutoff, agent_id, agent_id),
+                )
+            ]
+            channels = [
+                dict(r) for r in self.db.execute(
+                    "SELECT channel_id,agent_id,kind,connected,state,"
+                    "connected_at,last_seen,last_wake_result "
+                    "FROM channels WHERE agent_id=? AND connected=1 "
+                    "ORDER BY last_seen DESC",
+                    (agent_id,),
+                )
+            ]
+            return {
+                "agents": [result, *names],
+                "channels": channels, "edges": edges, "edgesTruncated": truncated,
+                "recent": recent, "server": {"now": now()},
+            }
+
     def record_tool_call(self, tool_name: str, status: str,
                          duration_ms: float, agent_id: str = "") -> None:
         """Keep only 100 safe MCP invocation summaries, no args or message bodies."""
@@ -353,6 +426,102 @@ class Store:
                 "items": [dict(row) for row in rows],
                 "page": page, "page_size": page_size, "total": total,
                 "pages": max(1, (total + page_size - 1) // page_size),
+            }
+
+    def conversations(self, agent_id: str) -> dict:
+        """Admin-only list of peers with whom this agent exchanged messages.
+
+        Read-only, restricted to unexpired messages. Does not update presence,
+        consume queues or change ACK status. The caller must authorize access.
+        """
+        cutoff = now() - MESSAGE_TTL_SECONDS
+        with self.lock:
+            owner = self._agent(agent_id)
+            peers = self.db.execute(
+                """
+                WITH exchanges AS (
+                    SELECT CASE WHEN sender_id = ? THEN recipient_id
+                                ELSE sender_id END AS peer_id,
+                           created_at, status, recipient_id
+                    FROM messages
+                    WHERE (sender_id = ? OR recipient_id = ?)
+                      AND created_at > ?
+                )
+                SELECT a.agent_id AS peer_id, a.name AS peer_name,
+                       a.kind AS peer_kind,
+                       COUNT(*) AS message_count,
+                       SUM(CASE WHEN e.status = 'pending'
+                                 AND e.recipient_id = ? THEN 1 ELSE 0 END)
+                           AS pending_for_agent,
+                       MAX(e.created_at) AS last_message_at
+                FROM exchanges e
+                JOIN agents a ON a.agent_id = e.peer_id
+                GROUP BY a.agent_id
+                ORDER BY last_message_at DESC, a.name ASC
+                """,
+                (agent_id, agent_id, agent_id, cutoff, agent_id),
+            ).fetchall()
+            return {"agent_id": agent_id, "agent_name": owner["name"],
+                    "items": [dict(row) for row in peers]}
+
+    def conversation_messages(
+        self, agent_id: str, peer_id: str, *,
+        before: str = "", limit: int = 30,
+    ) -> dict:
+        """Cursor-based history for one pair, newest window in ascending order.
+
+        The cursor is the oldest message ID from the previous page. By reading
+        the cursor row's (created_at, rowid), pagination remains deterministic
+        even when multiple messages share the same timestamp.
+        """
+        if not 1 <= limit <= 50:
+            raise ValueError("Conversation page size must be 1..50")
+        cutoff = now() - MESSAGE_TTL_SECONDS
+        with self.lock:
+            owner = self._agent(agent_id)
+            peer = self._agent(peer_id)
+            pair_args = (agent_id, peer_id, peer_id, agent_id)
+            pair_filter = ("((m.sender_id=? AND m.recipient_id=?) OR "
+                           "(m.sender_id=? AND m.recipient_id=?))")
+            cursor_clause = ""
+            args: list = [*pair_args, cutoff]
+            if before:
+                cursor_row = self.db.execute(
+                    "SELECT m.rowid, m.created_at FROM messages m "
+                    f"WHERE m.message_id=? AND {pair_filter} AND m.created_at>?",
+                    (before, *pair_args, cutoff),
+                ).fetchone()
+                if cursor_row is None:
+                    raise ValueError("Conversation cursor is invalid or expired")
+                cursor_clause = (
+                    " AND (m.created_at < ? OR "
+                    "(m.created_at = ? AND m.rowid < ?))"
+                )
+                args.extend((cursor_row["created_at"], cursor_row["created_at"],
+                             cursor_row["rowid"]))
+            args.append(limit + 1)
+            rows = self.db.execute(
+                """
+                SELECT m.message_id, m.sender_id, m.recipient_id,
+                       m.body, m.task_id, m.status,
+                       m.created_at, m.acknowledged_at,
+                       s.name AS sender_name, r.name AS recipient_name
+                FROM messages m
+                JOIN agents s ON s.agent_id=m.sender_id
+                JOIN agents r ON r.agent_id=m.recipient_id
+                WHERE """ + pair_filter + " AND m.created_at>?"
+                + cursor_clause +
+                " ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                args,
+            ).fetchall()
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {
+                "agent_id": agent_id, "agent_name": owner["name"],
+                "peer_id": peer_id, "peer_name": peer["name"],
+                "items": [dict(row) for row in reversed(page)],
+                "has_more": has_more,
+                "next_cursor": page[-1]["message_id"] if has_more else None,
             }
 
     def enable_dashboard(self, name: str, agent_id: str = "", token: str = "") -> dict:

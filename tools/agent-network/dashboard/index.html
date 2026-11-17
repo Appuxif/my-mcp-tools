@@ -72,7 +72,7 @@
         <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>
       </article>
       <article class="panel detail-panel">
-        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить выбранного агента и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
+        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="open-agent-chat" class="chat-open-button" type="button" disabled hidden title="Просмотреть переписки агента">Чаты</button><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить выбранного агента и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
         <div id="inspector" class="inspector-body"><div class="inspector-placeholder"><span>⌁</span><strong>Выберите агента</strong><p>Нажмите на узел сети, чтобы изучить его состояние и активность.</p></div></div>
       </article>
     </section>
@@ -168,8 +168,47 @@
 
     <footer class="page-footer"><div><span class="footer-mark">◈</span> Agent Network <span class="muted">· native MCP, optional wake sidecars</span></div><span>Локальная панель · не публикуйте её без авторизации</span></footer>
   </main>
+
+  <div id="chat-overlay" class="chat-overlay" hidden>
+    <div id="chat-backdrop" class="chat-backdrop" aria-hidden="true"></div>
+    <aside id="chat-drawer" class="chat-drawer" role="dialog" aria-modal="true"
+      aria-labelledby="chat-drawer-title" tabindex="-1">
+      <div class="chat-drawer-heading">
+        <div>
+          <div class="section-overline">CONVERSATION INSPECTOR</div>
+          <h3 id="chat-drawer-title">Переписки агента</h3>
+          <p id="chat-drawer-subtitle" class="chat-drawer-subtitle">Только сообщения за последние 24 часа</p>
+        </div>
+        <button id="chat-close" class="chat-close" type="button" aria-label="Закрыть переписки" title="Закрыть">×</button>
+      </div>
+      <div class="chat-drawer-layout">
+        <nav class="chat-peers" aria-label="Список переписок агента">
+          <div class="chat-peers-heading">Собеседники <span id="chat-peer-count" class="counter">0</span></div>
+          <div id="chat-peer-list" class="chat-peer-list"><div class="list-empty">Выберите агента, чтобы увидеть его переписки.</div></div>
+        </nav>
+        <section class="chat-thread" aria-label="Содержимое переписки">
+          <div class="chat-thread-heading">
+            <div class="chat-thread-title">
+              <strong id="chat-peer-title">Выберите собеседника</strong>
+              <span id="chat-thread-status">Содержимое доступно только администратору</span>
+            </div>
+            <button id="chat-refresh" class="chat-refresh" type="button" title="Обновить сообщения" disabled>Обновить ↻</button>
+          </div>
+          <div id="chat-thread-scroll" class="chat-thread-scroll" tabindex="0" role="log" aria-live="off">
+            <button id="chat-load-older" class="chat-load-older" type="button" hidden>Загрузить более ранние сообщения</button>
+            <div id="chat-messages" class="chat-messages">
+              <div class="chat-placeholder">Выберите собеседника из списка слева.</div>
+            </div>
+          </div>
+          <div id="chat-footer" class="chat-thread-footer">Просмотр без изменения статуса доставки и ACK · TTL 24 ч</div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
   <script src="/dashboard-assets/graph-utils.js" defer></script>
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
+  <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
 </body>
 </html>

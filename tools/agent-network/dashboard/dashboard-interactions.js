@@ -2,7 +2,6 @@
 (() => {
   const $ = id => document.getElementById(id);
   const key = 'agent-network:dashboard-agent:v1';
-  const adminKey = 'agent-network:admin-token:v1';
   const short = name => name.length > 20 ? name.slice(0, 19) + '…' : name;
   const ago = time => {
     if (!time) return 'никогда';
@@ -276,6 +275,15 @@
       add(row,'span',msg.status==='acknowledged'?'event-status done':'event-status',
           msg.status==='acknowledged'?'Получено':'В очереди');
       add(row,'span','event-time',ago(msg.created_at));
+      const open = add(row,'button','event-chat-button','Чат');
+      open.type='button';
+      open.title='Открыть переписку этих агентов';
+      open.setAttribute('aria-label','Открыть чат ' + msg.sender_name + ' и ' + msg.recipient_name);
+      open.addEventListener('click',() => document.dispatchEvent(
+        new CustomEvent('agent-network:open-chat',{
+          detail:{agentId:msg.sender_id,peerId:msg.recipient_id}
+        })
+      ));
     });
   }
 
@@ -323,20 +331,11 @@
       'Имя освободится; прежний токен перестанет работать.'
     );
     if (!accepted) return;
-    let adminToken = sessionStorage.getItem(adminKey) || '';
-    if (!adminToken) {
-      adminToken = prompt(
-        'Administrator token (from tools/agent-network/data/admin-token ' +
-        'on the server). This is independent of the dashboard agent.'
-      )?.trim() || '';
-      if (!adminToken) return;
-      sessionStorage.setItem(adminKey, adminToken);
-    }
     button.disabled = true;
     try {
       const result = await api(
         '/api/v1/dashboard/agents/' + encodeURIComponent(targetId),
-        {method:'DELETE', headers:{'X-Admin-Token':adminToken}}
+        {method:'DELETE'}
       );
       if (targetId === identity?.agent_id) {
         identity = null;
@@ -353,8 +352,7 @@
       void refreshHistories();
     } catch (error) {
       if (error.status === 401) {
-        sessionStorage.removeItem(adminKey);
-        status('Неверный административный токен. Повторите удаление для нового ввода.', true);
+        status('Требуется вход администратора. Обновите страницу.', true);
       } else {
         status('Удаление: ' + String(error.message || error), true);
       }

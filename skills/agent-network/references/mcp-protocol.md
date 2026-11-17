@@ -79,8 +79,14 @@ Arrow age labels are shown only for interactions within the past 10 minutes. An 
 
 ## Dashboard administration
 
-Administrative deletion requires a separate local administrator token stored
-beside the SQLite DB in `admin-token` (mode 0600). It does **not** require
-registering a dashboard agent; the browser requests the token separately
-and stores it in per-tab `sessionStorage`. The local dashboard is not a
-public multiuser administration interface. Do not share the token.
+The entire local dashboard uses one **HTTP Basic** login (username `admin`,
+password from the private `admin-token` file beside the SQLite DB). The browser
+reuses those credentials for all administrative actions, including deletion
+and conversation viewing. The dashboard does not ask for a second secret or
+store the administrator password in sessionStorage. The dashboard-agent toggle
+still registers an optional sender identity for chat and inbox operations.
+
+The ChatGPT extension HUD accesses only `GET /api/v1/agents/hud` with its own
+agent credentials; it cannot read the administrator dashboard. Native MCP
+and wake channels do not require Basic authentication. Do not expose Basic
+over plaintext Internet HTTP.

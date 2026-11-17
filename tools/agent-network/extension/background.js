@@ -50,19 +50,32 @@ async function setServer(tabId, raw) {
   return {server:url, changed:before!==url};
 }
 const connections = new Map(); // tabId -> { socket, interval }
-// Short-lived shared snapshots: status panels do not poll once per agent/tab.
-const dashboardCache = new Map();
-async function cachedDashboard(server) {
-  const current = dashboardCache.get(server);
+// Only agent-scoped metadata; never fetch the administrator dashboard.
+const agentStatusCache = new Map();
+async function cachedAgentStatus(server, record) {
+  const key = server + '|' + record.agentId;
+  const current = agentStatusCache.get(key);
   if (current && Date.now() - current.at < 4000) return current.promise;
-  const promise = fetchJSON(server, '/api/v1/dashboard');
-  dashboardCache.set(server, {at:Date.now(), promise});
-  if (dashboardCache.size > 12) {
-    dashboardCache.delete(dashboardCache.keys().next().value);
-  }
+  const promise = (async () => {
+    const response = await fetch(server + '/api/v1/agents/hud', {
+      method: 'GET',
+      headers: {
+        'Accept':'application/json',
+        'X-Agent-Id':record.agentId,
+        'X-Agent-Token':record.token,
+      },
+      cache:'no-store',
+      signal:AbortSignal.timeout(8000),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw Error(data.detail || 'Agent status HTTP ' + response.status);
+    return data;
+  })();
+  agentStatusCache.set(key, {at:Date.now(),promise});
+  if (agentStatusCache.size > 30) agentStatusCache.delete(agentStatusCache.keys().next().value);
   try { return await promise; }
   catch (error) {
-    if (dashboardCache.get(server)?.promise === promise) dashboardCache.delete(server);
+    if (agentStatusCache.get(key)?.promise === promise) agentStatusCache.delete(key);
     throw error;
   }
 }
@@ -204,7 +217,7 @@ async function hudStatus(sender) {
   };
   try {
     const [snapshot, ui] = await Promise.all([
-      cachedDashboard(server),
+      cachedAgentStatus(server, record),
       record.active ? probe(tabId, record).catch(() => null) : Promise.resolve(null)
     ]);
     return {

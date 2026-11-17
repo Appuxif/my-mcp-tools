@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from agent_network.server import Config, create_app
 from agent_network.store import Store
+from auth_helpers import basic_headers
 
 
 class DashboardStoreTests(unittest.TestCase):
@@ -57,6 +58,7 @@ class DashboardHttpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             app = create_app(Config(database=str(Path(tmp) / "test.db")))
             with TestClient(app, base_url="http://127.0.0.1:8787") as client:
+                client.headers.update(basic_headers(app))
                 page = client.get("/dashboard")
                 self.assertEqual(page.status_code, 200)
                 self.assertIn("Карта взаимодействий", page.text)
@@ -70,6 +72,12 @@ class DashboardHttpTests(unittest.TestCase):
                 self.assertIn("function edgeGeometry", graph_utils.text)
                 self.assertIn("function edgeAge", graph_utils.text)
                 self.assertIn("delete-agent", page.text)
+                self.assertIn("chat-overlay", page.text)
+                self.assertIn("open-agent-chat", page.text)
+                self.assertIn("dashboard-conversations.js", page.text)
+                chats_js = client.get("/dashboard-assets/dashboard-conversations.js")
+                self.assertEqual(chats_js.status_code, 200)
+                self.assertIn("function loadOlder", chats_js.text)
                 css = client.get("/dashboard-assets/styles.css")
                 self.assertEqual(css.status_code, 200)
                 self.assertIn(".edge.has-pending", css.text)

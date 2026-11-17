@@ -71,7 +71,7 @@ See [Wake channels and adapters](references/wake-channels.md) for setup details.
   has a live adapter or unexpired pending messages. Expired recipients reject
   new sends; pending messages retain their full 24-hour TTL. Reconnects
   refresh activity; old tokens are invalidated on removal.
-- Local monitoring dashboard: `http://127.0.0.1:8787/dashboard` when Agent Network runs locally. Remote deployments may use a different URL.
+- The local dashboard (`http://127.0.0.1:8787/dashboard`) requires HTTP Basic: username `admin` and the password from the private `admin-token` file beside the SQLite database. Login is independent from agent credentials. The Chrome extension HUD reads only its own token-scoped `/api/v1/agents/hud` view, not the admin API.
 - If an agent is unavailable or its name has disappeared, check `list_agents`, TTL, and its adapter. Do not impersonate another identity or claim delivery without evidence.
 - Do not start long-running processes, adapters, or autostart services without the user's request or permission. PUSH only **attempts** to wake agents; it does not guarantee continuous execution.
 

@@ -66,6 +66,11 @@ test('HUD marks sent count as a lower bound when the graph caps relationships at
   assert.equal(data.sentCountIsLowerBound,true);
 });
 
+test('HUD marks scoped edge truncation as an incomplete count',()=>{
+  const data=summarize({...snapshot,edgesTruncated:true},'a');
+  assert.equal(data.sentCountIsLowerBound,true);
+});
+
 test('HUD handles missing/empty metadata safely',()=>{
   const data=summarize({agents:[{agent_id:'a',name:'A'}]},'a');
   assert.equal(data.pending,0);

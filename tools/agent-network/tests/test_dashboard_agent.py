@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from agent_network.server import Config, create_app
 from agent_network.store import MESSAGE_TTL_SECONDS, Store
+from auth_helpers import basic_headers
 
 
 class BoundedHistoryTests(unittest.TestCase):
@@ -146,6 +147,7 @@ class DashboardAgentHttpTests(unittest.TestCase):
         self.app = create_app(Config(database=str(Path(self.temp.name)/"dash.db")))
         self.cm = TestClient(self.app, base_url="http://127.0.0.1:8787")
         self.client = self.cm.__enter__()
+        self.client.headers.update(basic_headers(self.app))
 
     def tearDown(self):
         self.cm.__exit__(None, None, None)

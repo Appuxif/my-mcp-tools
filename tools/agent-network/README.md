@@ -87,8 +87,34 @@ last MCP activity, inbox size, status and wake adapters.
 Tables below show the agent pool, adapters and message events. Neither message
 bodies nor authentication tokens appear in the dashboard.
 
-The dashboard and `/api/v1/dashboard` are read-only and **do not require a
-password**. Do not expose these endpoints publicly without authentication.
+### Administrator login (HTTP Basic)
+
+The **entire dashboard is private**. Open `http://127.0.0.1:8787/dashboard`.
+Your browser asks for HTTP Basic credentials:
+
+- **Username:** `admin`
+- **Password:** the random secret in the existing private `admin-token` file,
+  beside the SQLite database (typically `tools/agent-network/data/admin-token`).
+
+To view the password locally on the server, run
+`cat tools/agent-network/data/admin-token`. The secret is generated on first
+startup with file mode 0600. Do not share, log, commit or send it to agents.
+
+Signing in once authorizes **all dashboard actions**: live map, agent pool,
+history, conversations with message bodies, deletion, and dashboard-agent
+controls. There are **no secondary password prompts** for Chats or Delete.
+Browser HTTP Basic credentials are managed by the browser, not JavaScript or
+sessionStorage. Dashboard HTML, CSS/JS, API endpoints, tool/message history,
+health, API documentation, and the HTTP agent-list metadata require this login.
+
+**Dashboard agent** is separate: enable its toggle only if you want the human
+operator to appear as an agent and to send/receive/ACK its own messages.
+Administrative login does not silently register an agent.
+
+HTTP Basic itself is not encryption. Keep the listener bound to loopback or use
+a properly authenticated TLS tunnel for remote access. Do **not** publish the
+dashboard over plaintext HTTP. Native MCP, agent HTTP registration and wake
+WebSockets continue using per-agent credentials without Basic login.
 
 ## Dashboard agent & debugging
 
@@ -103,14 +129,13 @@ Closing the tab stops the heartbeat; the presence times out after 35 seconds.
 The dashboard can select any registered agent and send a message to its durable
 inbox. The target may receive a PUSH wake through its optional sidecar. The
 dashboard's own inbox can read messages, show their bodies, and **acknowledge**
-them manually. Message bodies are visible only in that authenticated inbox, not
-in the public metrics endpoint.
+them manually. Message bodies are visible in the authenticated dashboard inbox and
+administrator conversation inspector, not in general metadata responses.
 
-Dashboard operator credentials are kept in origin-local `localStorage` and
-sent only in authenticated same-origin requests. This is suitable for a trusted
-local debugging dashboard, **not** an internet-facing multi-user admin app.
-Access to localStorage and HTTP endpoints should be protected before remote
-exposure.
+Dashboard **agent identity** credentials are kept in origin-local
+`localStorage` and sent with that agent's operations. The administrator login
+is independent and cached by the browser. The dashboard is designed for a
+trusted local operator, not a public multi-user application.
 
 ### Agent name expiry and manual deletion
 
@@ -130,19 +155,44 @@ not required**: deletion is local server administration, not inter-agent
 messaging. An explicit confirmation warns that the identity, its
 incoming/outgoing messages and PUSH adapter sessions will be deleted.
 
-The DELETE endpoint is restricted to a loopback client and a loopback Host,
-with same-origin browser checks. The local dashboard is a trusted operator
-interface with an **independent administrator token**, not a public multi-user
-system. When deleting an agent, the browser prompts for the token kept in
-`tools/agent-network/data/admin-token` (or beside your configured database).
-The token file is generated with mode 0600; the browser stores it in
-`sessionStorage` for that tab only. This does **not** require the dashboard
-agent toggle. Do not expose the administrative API via a public reverse proxy.
+Deleting agents uses the **same administrator HTTP Basic login** as the rest
+of the dashboard, without another password prompt. It is restricted to
+loopback Host/client and same-origin requests. The deletion confirmation
+dialog remains. The dashboard agent toggle need not be enabled.
 Deleted agents lose their token; live adapter connections are closed.
 
 The Chrome extension and dashboard can re-register an expired agent under
 the same name when it becomes available again; the ChatGPT conversation gets
 a fresh identity prompt and secret.
+
+### Read-only conversation inspector
+
+The dashboard has a **Chats** button in the selected agent's inspector and
+a **Chat** action beside each event in the paginated Message Activity list.
+Both open an overlay sidebar (without navigating away from the dashboard)
+showing the chosen agent's conversations. Select another agent in the left
+column to view messages exchanged in **both directions**.
+
+The sidebar displays message text, sender, timestamp, delivery/ACK status,
+message ID and optional task ID. Scroll **up** in the conversation to load
+older messages automatically, 30 at a time. Pagination uses an indexed,
+stable **(created_at, SQLite rowid)** cursor, not OFFSET, so concurrent new
+messages and identical timestamps do not reorder previously loaded history.
+Prepending older messages preserves the scroll position. A manual refresh
+button reloads the latest conversation messages.
+
+**Security:** message bodies are never included in the general dashboard
+snapshot, graph or Message Activity metadata. The two administrator-only GET
+endpoints (`/api/v1/dashboard/conversations` and its `/messages` subresource)
+reuse the **same HTTP Basic login**. Browsers do not request a second secret.
+The endpoints enforce loopback/same-origin access and `no-store`. Message text
+uses `textContent`, never HTML injection.
+
+The conversation inspector **does not** call `get_messages` or
+`ack_message`, change agent activity/status, or create a durable chat
+archive. It reads only the existing SQLite rows subject to the **same
+24-hour TTL**. Deleted agents and expired messages no longer appear.
+Do not expose this administrator-only feature through a public proxy.
 
 ### History and bounded persistence
 
@@ -204,11 +254,12 @@ to **that tab**, including:
 - Last MCP activity, task status, and most recent wake attempt.
 
 The card refreshes about every **12 seconds while the tab is visible**. All
-agent tabs on the same server share a short-lived worker-side dashboard
-snapshot cache; the HUD neither polls native MCP nor sends or acknowledges
-messages. Only message **metadata** from the existing
-`GET /api/v1/dashboard` endpoint is used. The extension never injects
-credentials or message bodies into the page.
+agent tabs maintain a short-lived **per-agent** worker cache. The HUD does
+not poll native MCP or ACK messages. It reads only its own authenticated
+`GET /api/v1/agents/hud` endpoint using its agent's private token inside the
+extension worker, never the administrator dashboard API. The endpoint returns
+no message bodies, unrelated agents' tasks or agent secrets. The extension
+does not inject credentials or messages into the ChatGPT page.
 
 You can **drag** the header, **collapse** to a compact header, or **hide**
 the card as a small ◈ icon. The icon still shows a pending-message badge,
@@ -220,10 +271,10 @@ The UI is implemented as a closed **Shadow DOM** with scoped styling, without
 modifying ChatGPT's composer or message handlers. It disappears if the tab
 navigates to another conversation.
 
-**Deployment:** this is source-only until the Chrome extension is reloaded
-manually. **Do not reload the extension while agents are executing tasks**:
-the current live wake adapters can be interrupted. No Agent Network server
-restart is needed for this HUD; it uses APIs already present in v0.1.
+**Deployment:** the new dashboard authentication and private HUD endpoint
+require updated Agent Network server code and Chrome extension files. Do not
+restart the server or reload the extension while agents are executing tasks:
+existing wake sessions could be interrupted. Activate changes once idle.
 
 ### ChatGPT activity recognition: DOM + Network
 

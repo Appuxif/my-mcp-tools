@@ -62,10 +62,22 @@ function createWorker() {
       combineState(dom){return {state:dom}}
     },
     importScripts(){},
-    fetch:async url=>{
+    fetch:async (url,options)=>{
       requests++;
-      assert.equal(url,'http://127.0.0.1:8787/api/v1/dashboard');
-      return {ok:true,async json(){return snapshot}};
+      assert.equal(url,'http://127.0.0.1:8787/api/v1/agents/hud');
+      const id=options.headers['X-Agent-Id'];
+      assert.equal(options.headers['X-Agent-Token'],
+        id==='agent-A'?'AGENT_SECRET':'SECOND_SECRET');
+      const agent=snapshot.agents.find(a=>a.agent_id===id);
+      const others=snapshot.agents.filter(a=>a.agent_id!==id)
+        .map(a=>({agent_id:a.agent_id,name:a.name}));
+      const view={
+        ...snapshot,agents:[agent,...others],
+        channels:snapshot.channels.filter(c=>c.agent_id===id),
+        edges:snapshot.edges.filter(e=>e.source===id||e.target===id),
+        recent:snapshot.recent.filter(m=>m.sender_id===id||m.recipient_id===id)
+      };
+      return {ok:true,async json(){return view}};
     },
     AbortSignal, Date, Promise, setInterval(){return 1}, clearInterval(){},
   });
@@ -112,11 +124,14 @@ test('wrong frames, unbound tabs and changed conversations cannot inspect HUD',a
   assert.equal(bg.requests,0,'invalid tabs must not trigger server requests');
 });
 
-test('multiple agent tabs share one short-lived snapshot fetch',async()=>{
+test('different agents fetch separate scoped views and cache repeated calls',async()=>{
   const bg=createWorker();
   const a=await bg.request({type:'network:hud-status'},{tab:{id:10,url:chatA},frameId:0});
   const b=await bg.request({type:'network:hud-status'},{tab:{id:20,url:chatB},frameId:0});
-  assert.equal(bg.requests,1);
+  assert.equal(bg.requests,2);
+  const a2=await bg.request({type:'network:hud-status'},{tab:{id:10,url:chatA},frameId:0});
+  assert.equal(bg.requests,2);
+  assert.equal(a2.status.name,'alpha');
   assert.equal(a.status.name,'alpha');
   assert.equal(b.status.name,'beta');
   assert.equal(b.status.pending,9);

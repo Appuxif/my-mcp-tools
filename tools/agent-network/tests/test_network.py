@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from agent_network.codex_adapter import queue_wake
 from agent_network.server import Config, create_app
 from agent_network.store import Store
+from auth_helpers import basic_headers
 
 
 class StoreTests(unittest.TestCase):
@@ -95,6 +96,7 @@ class ApiTests(unittest.TestCase):
         ))
         self.cm = TestClient(self.app, base_url="http://127.0.0.1:8787")
         self.client = self.cm.__enter__()
+        self.client.headers.update(basic_headers(self.app))
 
     def tearDown(self):
         self.cm.__exit__(None, None, None)
