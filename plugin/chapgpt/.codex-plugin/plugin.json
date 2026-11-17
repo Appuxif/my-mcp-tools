@@ -1,7 +1,7 @@
 {
   "name": "dev-6ae5df3555ac8191aae4fe2dfb908a81",
-  "version": "1.1.0",
-  "description": "Персональные MCP-инструменты для Ubuntu Desktop, Blender, Chrome DevTools и терминала с руководствами по автоматизации рабочих процессов.",
+  "version": "1.2.0",
+  "description": "Персональные MCP-инструменты для Ubuntu Desktop, Blender, Chrome DevTools, терминала и взаимодействия агентов через Agent Network.",
   "author": {
     "name": "My MCP Tools"
   },
@@ -13,20 +13,23 @@
     "browser-automation",
     "chrome-devtools",
     "terminal",
-    "development"
+    "development",
+    "agent-network",
+    "multi-agent"
   ],
   "apps": "./.app.json",
   "interface": {
     "displayName": "My MCP",
     "shortDescription": "Ubuntu, Blender, Chrome и CLI",
-    "longDescription": "Подключает личные MCP-инструменты для управления компьютером Ubuntu, работы с Blender и 3D-сценами, автоматизации Chrome через DevTools, терминальных команд и файловых операций. Включает практические инструкции для выбора подходящего инструмента, последовательностей действий, ожидания изменений интерфейса, проверки результата и безопасной работы с существующими проектами. Требует предварительно подключённого My MCP Tools.",
+    "longDescription": "Подключает личные MCP-инструменты для управления Ubuntu, Blender, автоматизации Chrome через DevTools, терминальных команд и совместной работы нескольких агентов через Agent Network. Включает практические навыки по моделированию, работе с GUI, браузером, терминалом и обмену сообщениями между агентами с необязательными PUSH-адаптерами для ChatGPT и Codex CLI. Требует предварительно подключённого My MCP Tools.",
     "developerName": "My MCP Tools",
     "category": "Developer Tools",
     "capabilities": [
       "Управление рабочим столом Ubuntu",
       "Моделирование и анимация в Blender",
       "Автоматизация и отладка Chrome",
-      "Работа с терминалом и файлами"
+      "Работа с терминалом и файлами",
+      "Координация агентов и обмен сообщениями через MCP"
     ],
     "defaultPrompt": [
       "Посмотри, какое приложение сейчас активно в Ubuntu, и помоги выполнить в нём задачу.",
