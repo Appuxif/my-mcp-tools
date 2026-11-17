@@ -1,7 +1,40 @@
 const $ = id => document.getElementById(id);
 const fields = ['name', 'role', 'purpose', 'description'];
 let tabId;
+let knownAgents=[];
+let ownAgent=null;
+let confirmedPreview=null;
 const show = text => { $('status').textContent = text; };
+const cancelPreview = () => {
+  confirmedPreview=null;
+  $('migration-confirm').hidden=true;
+};
+function fillExisting() {
+  if (ownAgent) return;
+  cancelPreview();
+  const candidate=knownAgents.find(a=>a.name===$('name').value.trim());
+  if (candidate) {
+    for(const field of fields) $(field).value=candidate[field]||'';
+    for(const field of ['role','purpose','description']) $(field).disabled=true;
+    $('agent-source').textContent='Существующий агент · текущий чат: '+candidate.chatUrl+
+      ' · Профиль сохранится без изменений.';
+  } else {
+    for(const field of ['role','purpose','description']) $(field).disabled=false;
+    $('agent-source').textContent='Новое имя создаст отдельного агента. Имя из списка перенесёт существующего.';
+  }
+}
+function updateOptions(items) {
+  knownAgents=Array.isArray(items)?items:[];
+  const data=$('known-agents');
+  data.replaceChildren();
+  for(const agent of knownAgents) {
+    const option=document.createElement('option');
+    option.value=agent.name;
+    option.label=agent.role||agent.name;
+    data.append(option);
+  }
+}
+
 async function request(type, extra = {}) {
   const response = await chrome.runtime.sendMessage({ type, tabId, ...extra });
   if (!response?.ok) throw Error(response?.error || 'Ошибка расширения');
@@ -12,11 +45,17 @@ async function refresh() {
     const s = await request('network:status');
     $('server').value = s.server;
     $('show-hud').disabled = !s.entry;
+    ownAgent=s.entry||null;
+    const list=await request('network:available-agents');
+    updateOptions(list.items);
     if (s.entry) {
       for (const field of fields) $(field).value = s.entry[field] || '';
+      for(const field of ['role','purpose','description']) $(field).disabled=false;
       $('name').disabled = true;
+      $('agent-source').textContent='Этот чат уже привязан к агенту.';
     } else {
       $('name').disabled = false;
+      fillExisting();
     }
     show(s.entry
       ? [s.entry.name + ' · ' + (s.entry.active ? 'включён' : 'остановлен'),
@@ -25,7 +64,7 @@ async function refresh() {
          'Сеть: ' + (s.ui?.network || 'нет данных') +
            ' · ' + (s.ui?.activeRequests ?? 0) + ' запросов',
          s.entry.bootstrapDone ? '' : 'Требуется инициализация чата'].filter(Boolean).join('\n')
-      : 'Агент не зарегистрирован. Для регистрации откройте чат ChatGPT и нажмите Старт.');
+      : 'Этот чат пока не привязан к агенту. Выбери существующего по имени для переноса или создай нового.');
   } catch (e) { show(String(e.message || e)); }
 }
 function parseServer(raw) {
@@ -79,11 +118,50 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { show(String(e.message || e)); }
     finally { $('show-hud').disabled=false; }
   });
+  $('name').addEventListener('input', fillExisting);
+  for(const field of ['role','purpose','description'])
+    $(field).addEventListener('input', cancelPreview);
+  $('cancel-migration').addEventListener('click', () => {
+    cancelPreview();
+    show('Перенос отменён. Исходный агент остался в прежнем чате.');
+  });
+  $('confirm-migration').addEventListener('click', async () => {
+    if(!confirmedPreview) return;
+    const preview=confirmedPreview;
+    $('confirm-migration').disabled=true;
+    $('start').disabled=true;
+    try {
+      show('Инициализирую агента в новом чате и переношу PUSH…');
+      const result=await request('network:migrate',{
+        agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+        expectedDestination:preview.toChatUrl,
+      });
+      cancelPreview();
+      await refresh();
+      show('Агент '+result.name+' перенесён в новый чат. ID и история Agent Network сохранены.'+
+        (result.connectionWarning ? '\n'+result.connectionWarning : ''));
+    } catch(error) { show(String(error.message||error)); }
+    finally {
+      $('confirm-migration').disabled=false;
+      $('start').disabled=false;
+    }
+  });
   $('start').addEventListener('click', async () => {
     $('start').disabled = true;
     try {
       const profile = Object.fromEntries(fields.map(f => [f, $(f).value.trim()]));
       if (!profile.name || !profile.role) throw Error('Укажи имя и роль.');
+      if(!ownAgent && knownAgents.some(agent=>agent.name===profile.name)) {
+        const preview=await request('network:migration-preview',{name:profile.name});
+        confirmedPreview=preview;
+        $('migration-description').textContent=
+          'Перенести '+preview.name+' из '+preview.fromChatUrl+
+          ' в этот чат? Старый чат перестанет получать PUSH-сообщения.';
+        $('migration-confirm').hidden=false;
+        show('Проверь перенос и нажми «Подтвердить перенос».');
+        return;
+      }
+      cancelPreview();
       show('Регистрирую агента…');
       await request('network:start', {profile});
       await refresh();

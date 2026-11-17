@@ -25,6 +25,11 @@ button:disabled{opacity:.45;cursor:default}
 button.primary{background:#267e89}
 button.secondary{background:#1d3149;border-color:#345472;color:#cee1f4}
 button.ghost{background:#162438;border-color:#2c425d;color:#b9cee6}
+[hidden]{display:none!important}
+.transfer-review{margin-top:12px;padding:11px;background:#23312e;border:1px solid #537b6e;border-radius:9px}
+.transfer-review strong{color:#a8edcd}
+.transfer-review p{margin:6px 0;font-size:11px;color:#d6e6e1}
+.transfer-review code{overflow-wrap:anywhere;color:#abc7e1;font-size:10px}
 .server-actions{display:flex;gap:8px;margin-top:9px}
 .server-actions button{flex:1}
 #server{font:12px system-ui}
@@ -50,11 +55,22 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 
 <section class="section">
 <div class="section-title">АГЕНТ · ЭТОТ ЧАТ</div>
-<label for="name">Имя</label><input id="name" maxlength="64" placeholder="frontend-agent">
+<label for="name">Имя</label><input id="name" maxlength="64" list="known-agents" autocomplete="off" placeholder="Выбери агента или введи новое имя">
+<datalist id="known-agents"></datalist>
+<small id="agent-source" class="hint">Можно выбрать уже зарегистрированного агента для переноса в этот чат.</small>
 <label for="role">Роль</label><input id="role" maxlength="120" placeholder="Frontend developer">
 <label for="purpose">Назначение</label><input id="purpose" maxlength="1000" placeholder="Работа над интерфейсом">
 <label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
 <div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button></div>
+<div id="migration-confirm" class="transfer-review" hidden role="group" aria-labelledby="migration-title">
+  <strong id="migration-title">Перенос существующего агента</strong>
+  <p id="migration-description"></p>
+  <p>История ChatGPT не копируется. Имя, ID агента, сообщения и задачи в Agent Network сохранятся.</p>
+  <div class="agent-actions">
+    <button class="primary" id="confirm-migration">Подтвердить перенос</button>
+    <button class="secondary" id="cancel-migration">Отмена</button>
+  </div>
+</div>
 <div class="agent-actions"><button class="ghost" id="show-hud" disabled>◈ Показать плавающее окно</button></div>
 <small class="hint">Агент привязан к ID беседы, а не вкладке: при открытии этого чата в другой вкладке имя и настройки сохраняются. Плавающее окно открывается только этой кнопкой.</small>
 </section>

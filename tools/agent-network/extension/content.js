@@ -48,9 +48,12 @@
     return false;
   }
 
-  function state() {
+  const newChatPage = () => location.pathname === '/' ||
+    /^\/g\/[^/]+(?:\/project)?\/?$/.test(location.pathname);
+  function state(allowNewChat=false) {
     const input = editor();
-    if (!input || !location.pathname.includes('/c/') || document.readyState === 'loading')
+    if (!input || (!location.pathname.includes('/c/') &&
+        !(allowNewChat && newChatPage())) || document.readyState === 'loading')
       return { state: 'unknown', reason: 'no conversation or composer', url: location.href };
     if (isGenerating()) return { state: 'busy', reason: 'stop-generation control', url: location.href };
     if (hasComposerAttachments(input))
@@ -87,11 +90,23 @@
     }
   }
 
-  async function send(text, expectedUrl) {
+  async function send(text, expectedUrl, allowNewChat=false) {
     if (location.href !== expectedUrl)
       throw Error('Conversation changed; wake cancelled');
-    if (state().state !== 'idle')
-      throw Error('Chat is generating, unavailable or contains a draft');
+    if (allowNewChat && !newChatPage())
+      throw Error('New-chat bootstrap is only permitted on the new-chat page');
+    if (!allowNewChat && !location.pathname.includes('/c/'))
+      throw Error('Open an existing ChatGPT conversation before sending a wake');
+    const deadlineReady = Date.now() + 8000;
+    let readiness = state(allowNewChat);
+    while (readiness.state === 'unknown' && Date.now() < deadlineReady) {
+      await sleep(200);
+      if (location.href !== expectedUrl)
+        throw Error('Conversation changed while waiting for the editor');
+      readiness = state(allowNewChat);
+    }
+    if (readiness.state !== 'idle')
+      throw Error('Chat not ready (' + readiness.state + '): ' + (readiness.reason || 'unknown reason'));
     const input = editor();
     setText(input, text);
     const deadline = Date.now() + 6000;
@@ -124,7 +139,7 @@
       if (message?.type === 'agent:send') {
         if (message.wakeId && seen.has(message.wakeId))
           return { ok: true, duplicate: true };
-        const result = await send(message.text, message.url);
+        const result = await send(message.text, message.url, message.allowNewChat === true);
         if (message.wakeId) seen.add(message.wakeId);
         return { ok: true, ...result };
       }

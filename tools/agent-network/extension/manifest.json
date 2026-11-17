@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Agent Network Wake",
-  "version": "0.4.0",
-  "description": "ChatGPT Agent Network wake adapter: URL-bound agent identity and an opt-in floating status/chat HUD.",
+  "version": "0.5.0",
+  "description": "ChatGPT Agent Network: identity migration across chats, safe profile reuse and opt-in HUD.",
   "permissions": [
     "storage",
     "tabs",

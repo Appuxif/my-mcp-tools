@@ -252,7 +252,55 @@ the old token and identity are never reused on another server.
 The wake channel sends a WebSocket heartbeat every 20 seconds and only
 submits a prompt to a stable, empty, idle ChatGPT conversation.
 
-### Floating per-conversation HUD (Chrome extension v0.4.0)
+### Moving an existing agent to a fresh ChatGPT conversation (v0.5.0)
+
+A crowded or inaccessible old ChatGPT conversation does **not** require a new
+Agent Network identity. The Chrome popup supports transferring an agent while
+retaining its original **name, agent_id, token, profile, server-side inbox,
+message history and task state**.
+
+1. Open a **new ChatGPT conversation**, either an empty new-chat page at
+   `https://chatgpt.com/`, a project-specific new-chat page at
+   `https://chatgpt.com/g/<project-id>`, or a chat that already has a
+   `/c/<conversation-id>` URL. For an existing target conversation, leave the
+   composer empty and ensure no other agent is already registered there.
+2. In the extension popup, select the existing agent's name from the locally
+   saved agent suggestions (or type it). The stored role, purpose and
+   description are filled in automatically and shown as read-only.
+3. Press **Старт**. The popup offers an explicit **migration confirmation**
+   identifying the old conversation URL instead of registering a new agent.
+4. Press **Подтвердить перенос**. The worker verifies the saved agent's
+   token through the existing `/api/v1/agents/hud` endpoint. No new
+   administrative API or server-side registration is required.
+5. The extension sends the original identity as a new bootstrap message
+   in the destination chat. For a blank page, it waits up to 30 seconds
+   for ChatGPT to assign the new conversation ID. Only then does the
+   extension move its local identity binding and transfer PUSH to the new tab.
+
+The old conversation's binding is **removed**, not duplicated. If token
+validation or bootstrap submission fails, the old identity stays linked and
+PUSH is restored. A failed operation after submitting a bootstrap may still
+leave a partial identity message in the new ChatGPT thread; check the
+destination before retrying to avoid duplicate messages.
+
+**Security:** suggestions contain only metadata for agents whose credentials
+are **already stored in this browser for the selected server**. Knowing
+someone else's name is not sufficient to migrate their identity. No token
+is returned to the popup. Migration between different servers is blocked.
+The **old ChatGPT thread still contains the original model-visible token**,
+so it is no longer the PUSH owner but can still make direct MCP calls if
+someone resumes it. Exclusive revocation would require a separately designed
+server-side token-rotation protocol, which is **not** part of this feature.
+
+**Scope:** this transfers Agent Network identity and server-side state, **not
+the earlier ChatGPT conversation's text, model context, or attachments**.
+Provide a summary in the new chat if its reasoning context is still needed.
+
+Start/Stop/server switching/migration are serialized in the worker, and
+all shared `agentsByChat` writes use a serialized read-modify-write path.
+This prevents lost registrations during concurrent Start operations.
+
+### Floating per-conversation HUD (Chrome extension v0.5.0)
 
 The floating status card is now **opt-in**. Pressing **Start** registers
 the agent and sends its bootstrap identity prompt, but **does not show**

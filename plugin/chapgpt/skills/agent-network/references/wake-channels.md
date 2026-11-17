@@ -45,6 +45,18 @@ The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-
 4. The extension monitors the DOM (composer, Stop generating, text drafts, file/image attachments and uploading files) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
 5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, attachment or upload, and the conversation URL has not changed. If the attachment region is absent, wake is blocked rather than risking a file upload. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
 
+**Move an existing ChatGPT agent:** open a new chat (an empty
+`chatgpt.com/` page or a chat with a `/c/<id>` URL), select an existing
+locally saved agent by name in the extension popup, press **Start** and
+confirm the migration. The worker validates the agent's existing token
+using the per-agent HUD API, sends its original identity bootstrap into
+the new chat, and moves the bound URL and PUSH adapter. The agent ID, pending
+inbox, tasks and server message history stay unchanged. The previous ChatGPT
+conversation text is **not** copied. Access to the original agent's token
+is required; a name alone cannot authorize migration. The previous ChatGPT
+thread retains its historical copy of the original token and could still
+call MCP if reactivated manually; moving PUSH is not token revocation.
+
 The floating HUD is **manual**, not automatic: pressing **Start** registers
 the agent but does not display an overlay. Open the extension popup in the
 registered conversation and choose the **Show floating panel** button (Russian UI: Show HUD) to add it to

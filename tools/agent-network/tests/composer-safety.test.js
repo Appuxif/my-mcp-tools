@@ -6,7 +6,10 @@ const path = require('node:path');
 
 const code = fs.readFileSync(path.join(__dirname, '..', 'extension', 'content.js'), 'utf8');
 
-function chat({attached=false, fileSelected=false, attachAfterInsert=false, text=''}={}) {
+function chat({
+  attached=false,fileSelected=false,attachAfterInsert=false,text='',
+  url='https://chatgpt.com/c/test'
+}={}) {
   let listener, clicks=0;
   const tray={childElementCount:attached ? 1 : 0, textContent:''};
   const file={files:fileSelected ? [{name:'private.pdf'}] : []};
@@ -20,14 +23,14 @@ function chat({attached=false, fileSelected=false, attachAfterInsert=false, text
     },
   };
   const input={
-    value:'', innerText:text, textContent:text,
+    value:undefined, innerText:text, textContent:text,
     closest() { return form; },
     focus() {},
   };
   const send={disabled:false,getAttribute(){return null;},click(){clicks++;}};
   const selection={removeAllRanges(){},addRange(){}};
   const globals={
-    location:{href:'https://chatgpt.com/c/test',pathname:'/c/test'},
+    location:{href:url,pathname:new URL(url).pathname},
     document:{
       readyState:'complete',
       querySelector(selector) {
@@ -99,4 +102,54 @@ test('ChatGPT composer content script does not steal HUD Start messages',()=>{
   const result=page.unrelated('network:hud-show');
   assert.equal(result.accepted,false);
   assert.equal(result.responded,false);
+});
+
+test('new blank ChatGPT chat accepts bootstrap ONLY when explicitly allowed',async()=>{
+  const url='https://chatgpt.com/';
+  const page=chat({url});
+  assert.equal((await page.run({type:'agent:probe'})).state,'unknown');
+  const blocked=await page.run({type:'agent:send',text:'Bootstrap',url});
+  assert.equal(blocked.ok,false);
+  assert.equal(page.clicks(),0);
+  const allowed=await page.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true});
+  assert.equal(allowed.ok,true,allowed.error);
+  assert.equal(page.clicks(),1);
+});
+
+test('new project chat accepts bootstrap, but never overwrites an attached file',async()=>{
+  const url='https://chatgpt.com/g/g-p-example-edu';
+  const safe=chat({url});
+  assert.equal((await safe.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true})).ok,true);
+  assert.equal(safe.clicks(),1);
+  const attached=chat({url,attached:true});
+  assert.equal((await attached.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true})).ok,false);
+  assert.equal(attached.clicks(),0);
+});
+
+test('allowNewChat cannot be used to bypass safety on existing conversations',async()=>{
+  const url='https://chatgpt.com/c/test';
+  const page=chat({url});
+  const result=await page.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true});
+  assert.equal(result.ok,false);
+  assert.equal(page.clicks(),0);
+});
+
+test('ChatGPT project landing path /g/<project-id>/project accepts blank-chat bootstrap',async()=>{
+  const url='https://chatgpt.com/g/g-p-example-edu/project';
+  const page=chat({url});
+  assert.equal((await page.run({type:'agent:probe'})).state,'unknown');
+  const initial=await page.run({type:'agent:send',text:'Bootstrap',url});
+  assert.equal(initial.ok,false,'ordinary wake must still reject new-chat landing pages');
+  const result=await page.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true});
+  assert.equal(result.ok,true,result.error);
+  assert.equal(page.clicks(),1);
+});
+
+test('project new-chat landing preserves an existing draft and never sends migration bootstrap',async()=>{
+  const url='https://chatgpt.com/g/g-p-example-edu/project';
+  const page=chat({url,text:'unfinished text'});
+  const result=await page.run({type:'agent:send',text:'Bootstrap',url,allowNewChat:true});
+  assert.equal(result.ok,false);
+  assert.match(result.error,/draft.*composer contains user text/i);
+  assert.equal(page.clicks(),0);
 });

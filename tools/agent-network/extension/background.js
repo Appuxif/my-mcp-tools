@@ -41,8 +41,9 @@ async function setServer(tabId, raw) {
     throw Error('Сначала останови агента, затем переключи сервер.');
   if (before !== url && record) {
     disconnect(record.ownerTabId);
-    delete entries[key]; // Never use an agent token on a different server.
-    await save(entries);
+    await updateRecords(records => {
+      if (records[key]?.agentId === record.agentId) delete records[key];
+    }); // Never use an agent token on a different server.
   }
   const data = await chrome.storage.local.get('serverByTab');
   await chrome.storage.local.set({
@@ -92,6 +93,37 @@ function chatKey(raw) {
   } catch { return null; }
 }
 const chatUrl = url => !!chatKey(url);
+function newChatUrl(raw) {
+  try {
+    const url = new URL(raw);
+    return url.origin === 'https://chatgpt.com' &&
+      (url.pathname === '/' ||
+       /^\/g\/[^/]+(?:\/project)?\/?$/.test(url.pathname));
+  } catch { return false; }
+}
+
+// Chrome Storage is copy-on-read; serialize every read-modify-write to avoid
+// lost updates when two conversations register concurrently.
+let recordWriteQueue=Promise.resolve();
+function updateRecords(mutator) {
+  const operation=recordWriteQueue.catch(()=>{}).then(async()=>{
+    const entries=await storage();
+    const result=mutator(entries);
+    await save(entries);
+    return result;
+  });
+  recordWriteQueue=operation.catch(()=>{});
+  return operation;
+}
+
+// Start, Stop, migration and server changes are lifecycle transitions.
+// Serialize them so Stop cannot race an in-flight Start/registration.
+let lifecycleQueue=Promise.resolve();
+function lifecycle(operation) {
+  const run=lifecycleQueue.catch(()=>{}).then(operation);
+  lifecycleQueue=run.catch(()=>{});
+  return run;
+}
 
 // One-time migration from tab-indexed identities to stable conversation keys.
 // A shared promise prevents concurrent worker operations from racing migration.
@@ -207,7 +239,7 @@ async function wake(tabId, record, ws, msg) {
 }
 async function connect(tabId, record) {
   const key=chatKey(record.chatUrl);
-  if (!key) return;
+  if (!key || migratingKeys.has(key)) return;
   if (connectionLocks.has(key)) return connectionLocks.get(key);
   const task=connectOwned(tabId,record);
   connectionLocks.set(key,task);
@@ -236,12 +268,15 @@ async function connectOwned(tabId, record) {
   for (const [otherId, connection] of connections) {
     if (connection.key === key && otherId !== Number(tabId)) return;
   }
-  current.ownerTabId = Number(tabId);
-  entries[key] = current;
-  await save(entries);
-
-  const liveRecord = {...current, chatUrl:tab.url};
-  const ws = new WebSocket(socketUrl(current.server || await serverForTab(tabId,current)));
+  const saved=await updateRecords(records => {
+    if (!records[key]?.active || records[key]?.agentId!==current.agentId)
+      return null;
+    records[key].ownerTabId=Number(tabId);
+    return {...records[key]};
+  });
+  if (!saved) return;
+  const liveRecord = {...saved, chatUrl:tab.url};
+  const ws = new WebSocket(socketUrl(saved.server || await serverForTab(tabId,saved)));
   const connection = {socket:ws, interval:null, key};
   connections.set(Number(tabId), connection);
   ws.onopen = async () => {
@@ -262,13 +297,14 @@ async function connectOwned(tabId, record) {
     else if (msg.type==='error') {
       console.warn('Agent Network:',msg.error);
       if (String(msg.error).includes('Unknown agent_id')) {
-        void storage().then(async items => {
-          if (items[key]?.agentId !== current.agentId) return;
-          items[key].active=false;
-          items[key].bootstrapDone=false;
-          await save(items);
+        void (async () => {
+          await updateRecords(records => {
+            if(records[key]?.agentId!==current.agentId) return;
+            records[key].active=false;
+            records[key].bootstrapDone=false;
+          });
           disconnect(tabId);
-        });
+        })();
       }
     }
   };
@@ -282,7 +318,7 @@ async function resumeAll() {
   const entries=await storage();
   const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'}).catch(()=>[]);
   for (const [key,record] of Object.entries(entries)) {
-    if (!record.active) continue;
+    if (!record.active || migratingKeys.has(key)) continue;
     let owner = record.ownerTabId
       ? await chrome.tabs.get(Number(record.ownerTabId)).catch(()=>null)
       : null;
@@ -411,6 +447,161 @@ async function revealHud(tabId, record) {
   return result?.ok === true;
 }
 
+function bootstrapPrompt(record, migrated=false) {
+  return [
+    '[Agent Network identity — private credential]',
+    migrated
+      ? 'This conversation is the new ChatGPT home of an EXISTING Agent Network identity.'
+      : 'You are the registered agent named ' + record.name + '.',
+    'Agent name: ' + record.name,
+    'Role: ' + record.role,
+    'Purpose: ' + record.purpose,
+    'Description: ' + record.description,
+    'Use the native agent-network MCP tools for ALL inter-agent messages.',
+    'agent_id: ' + record.agentId,
+    'token: ' + record.token,
+    'Keep the token private. Use list_agents/get_messages/send_message/ack_message.',
+    'Call get_messages now to check for pending work. Wake signals will arrive through this chat.',
+    ...(migrated ? [
+      'This is a new ChatGPT conversation. Prior ChatGPT conversation history was not copied.',
+      'Continue using the same Agent Network ID, profile, pending inbox and task state.'
+    ] : []),
+  ].join('\n');
+}
+
+function existingCandidates(entries, server, excludeKey=null) {
+  return Object.entries(entries).filter(([key,r]) =>
+    key!==excludeKey && r?.agentId && r?.token &&
+    (r.server||DEFAULT_SERVER)===server
+  ).map(([key,r]) => ({
+    chatUrl:key,agentId:r.agentId,name:r.name,
+    role:r.role,purpose:r.purpose,description:r.description,active:!!r.active
+  })).sort((a,b)=>a.name.localeCompare(b.name));
+}
+async function availableAgents(tabId) {
+  const {key,record}=await currentRecord(tabId);
+  const server=await serverForTab(tabId,record);
+  return {
+    items:existingCandidates(await storage(),server,key),
+    canMigrate:!record,
+    server,
+  };
+}
+
+async function migrationPreview(tabId,name) {
+  const tab=await chrome.tabs.get(Number(tabId));
+  const target=chatKey(tab?.url);
+  if (!target && !newChatUrl(tab?.url))
+    throw Error('Открой новый чат ChatGPT перед переносом агента.');
+  const entries=await storage();
+  if (target && entries[target])
+    throw Error('В этом чате уже есть агент. Сначала открой новый чат без привязки.');
+  const server=await serverForTab(tabId);
+  const candidates=existingCandidates(entries,server,target).filter(r=>r.name===name);
+  if(candidates.length!==1)
+    throw Error('Агент не найден среди локально сохранённых регистраций этого сервера.');
+  const source=candidates[0];
+  return {
+    migrate:true,agentId:source.agentId,name:source.name,
+    fromChatUrl:source.chatUrl,toChatUrl:tab.url,
+    needsNewChat:!target,server,
+  };
+}
+
+async function verifyMigrationAgent(server,record) {
+  const response=await fetch(server+'/api/v1/agents/hud',{
+    method:'GET', cache:'no-store', signal:AbortSignal.timeout(8000),
+    headers:{
+      'Accept':'application/json',
+      'X-Agent-Id':record.agentId,
+      'X-Agent-Token':record.token,
+    },
+  });
+  if(!response.ok) throw Error(
+    'Не удалось подтвердить доступ к старому агенту (HTTP '+response.status+').'
+  );
+  const snapshot=await response.json();
+  if(!snapshot.agents?.some(a=>a.agent_id===record.agentId && a.name===record.name))
+    throw Error('Сервер вернул неподходящую идентичность агента.');
+}
+
+async function waitForConversation(tabId, originalUrl, timeoutMs=30000) {
+  const start=Date.now();
+  while(Date.now()-start<timeoutMs) {
+    const tab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
+    if(!tab) throw Error('Вкладка закрылась до создания нового чата.');
+    const key=chatKey(tab.url);
+    if(key) return {tab,key};
+    if(tab.url!==originalUrl)
+      throw Error('Открылась другая страница вместо нового чата.');
+    await new Promise(resolve=>setTimeout(resolve,250));
+  }
+  throw Error('ChatGPT не выдал ID новой беседы. Старый агент сохранён без изменений.');
+}
+const migratingKeys=new Set();
+async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestination) {
+  const tab=await chrome.tabs.get(Number(tabId));
+  if(!tab || tab.url!==expectedDestination)
+    throw Error('Адрес новой беседы изменился после подтверждения.');
+  let targetKey=chatKey(tab.url);
+  if(!targetKey && !newChatUrl(tab.url))
+    throw Error('Текущая страница не является новым чатом ChatGPT.');
+  const records=await storage();
+  const old=records[fromChatUrl];
+  if(!old || old.agentId!==expectedAgentId || !old.token)
+    throw Error('Исходный агент изменился. Открой расширение заново.');
+  if(fromChatUrl===targetKey || (targetKey && records[targetKey]))
+    throw Error('В целевой беседе уже зарегистрирован агент.');
+  const server=await serverForTab(tabId);
+  if(server!==(old.server||DEFAULT_SERVER))
+    throw Error('Нельзя перенести агента между серверами.');
+  await verifyMigrationAgent(server,old);
+  // Keep the old binding durable until the new chat accepts its bootstrap.
+  // Temporarily disconnect old PUSH to avoid delivering wakes into both chats.
+  migratingKeys.add(fromChatUrl);
+  disconnect(old.ownerTabId);
+  let transferred=false;
+  try {
+    const result=await askTab(tabId,{
+      type:'agent:send',text:bootstrapPrompt(old,true),
+      url:tab.url,allowNewChat:!targetKey,
+    });
+    if(!result?.ok) throw Error('Новый чат не принял инициализацию: '+(result?.error||'unknown'));
+    const destination=targetKey
+      ? {tab:await chrome.tabs.get(Number(tabId)),key:targetKey}
+      : await waitForConversation(tabId,tab.url);
+    if(chatKey(destination.tab?.url)!==destination.key)
+      throw Error('Новая беседа изменилась во время инициализации.');
+    targetKey=destination.key;
+    // Move, not copy: only the new chat should use this agent identity.
+    const updated=await updateRecords(entries=>{
+      if(entries[fromChatUrl]?.agentId!==expectedAgentId || entries[targetKey])
+        throw Error('Привязки изменились при переносе. Попробуй ещё раз.');
+      const moved={
+        ...entries[fromChatUrl],chatUrl:targetKey,
+        ownerTabId:Number(tabId),active:true,bootstrapDone:true,
+      };
+      delete entries[fromChatUrl];
+      entries[targetKey]=moved;
+      return moved;
+    });
+    transferred=true;
+    let connectionWarning='';
+    try { await connect(tabId,updated); }
+    catch(error) {
+      // The identity was successfully transferred and must never roll back
+      // after ChatGPT accepted the new bootstrap. PUSH can reconnect later.
+      connectionWarning='PUSH сейчас недоступен: '+String(error.message||error);
+    }
+    return {migrated:true,agentId:updated.agentId,name:updated.name,
+            fromChatUrl,toChatUrl:targetKey,
+            connected:!!connections.get(Number(tabId)),connectionWarning};
+  } finally {
+    migratingKeys.delete(fromChatUrl);
+    if(!transferred) await resumeAll(); // Failed migration keeps old owner working.
+  }
+}
+
 const startLocks = new Map();
 async function startAgent(tabId, profile) {
   const {tab,key}=await currentRecord(tabId);
@@ -460,39 +651,37 @@ async function registerConversation(tabId, profile) {
     };
     created=true;
   }
-  entries[key]=record;
-  await save(entries);
+  const actualTab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
+  const sameChat=chatKey(actualTab?.url)===key;
+  if (!sameChat && created) record={...record,active:false,bootstrapDone:false};
+  if (sameChat || created) {
+    await updateRecords(records=>{ records[key]=record; });
+  }
+  if (!sameChat) throw Error(
+    'Чат изменился во время регистрации. Вернитесь в исходную беседу и повторите Старт.'
+  );
 
   // Registration controls agent identity only. The floating HUD is never
   // shown automatically; the popup has a separate explicit Show button.
   await connect(tabId,record);
 
   if (!record.bootstrapDone) {
-    const bootstrap=[
-      '[Agent Network identity — private credential]',
-      'You are the registered agent named '+record.name+'.',
-      'Role: '+record.role,'Purpose: '+record.purpose,
-      'Description: '+record.description,
-      'Use the native agent-network MCP tools for ALL inter-agent messages.',
-      'agent_id: '+record.agentId,
-      'token: '+record.token,
-      'Keep the token private. Use list_agents/get_messages/send_message/ack_message.',
-      'Call get_messages now to check for pending work. Wake signals will arrive through this tab.',
-    ].join('\n');
+    const bootstrap=bootstrapPrompt(record);
     const sent=await askTab(tabId,{type:'agent:send',text:bootstrap,url:tab.url});
     if(!sent?.ok) throw Error('Registered, but initialization prompt was not sent: '+(sent?.error||'unknown'));
     record.bootstrapDone=true;
-    entries[key]=record;
-    await save(entries);
+    await updateRecords(records=>{
+      if (records[key]?.agentId===record.agentId) records[key].bootstrapDone=true;
+    });
   }
   return {agentId:record.agentId,name:record.name,created};
 }
 async function stopAgent(tabId) {
-  const {key,entries,record}=await currentRecord(tabId);
+  const {key,record}=await currentRecord(tabId);
   if (!record || !key) return {stopped:true};
-  record.active=false;
-  entries[key]=record;
-  await save(entries);
+  await updateRecords(records=>{
+    if(records[key]?.agentId===record.agentId) records[key].active=false;
+  });
   disconnect(record.ownerTabId);
   return {stopped:true};
 }
@@ -526,9 +715,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!visible) throw Error('Не удалось показать панель в текущем чате.');
         return {visible:true};
       }
-      case 'network:start': return startAgent(message.tabId, message.profile);
-      case 'network:stop': return stopAgent(message.tabId);
-      case 'network:set-server': return setServer(message.tabId, message.server);
+      case 'network:available-agents': return availableAgents(message.tabId);
+      case 'network:migration-preview':
+        return migrationPreview(message.tabId,message.name);
+      case 'network:migrate':
+        return lifecycle(()=>migrateAgent(
+          message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination
+        ));
+      case 'network:start': return lifecycle(()=>startAgent(message.tabId, message.profile));
+      case 'network:stop': return lifecycle(()=>stopAgent(message.tabId));
+      case 'network:set-server': return lifecycle(()=>setServer(message.tabId, message.server));
       case 'network:open-dashboard': {
         const {record}=await currentRecord(message.tabId);
         const server = await serverForTab(message.tabId,record);
@@ -545,14 +741,12 @@ chrome.tabs.onRemoved.addListener(tabId => {
   disconnect(tabId);
   traffic.clear(tabId);
   void (async () => {
-    const entries=await storage();
-    let changed=false;
-    for (const record of Object.values(entries)) {
-      if (Number(record.ownerTabId)===Number(tabId)) {
-        record.ownerTabId=null;changed=true;
+    await updateRecords(entries=>{
+      for(const record of Object.values(entries)){
+        if(record.ownerTabId!=null && Number(record.ownerTabId)===Number(tabId))
+          record.ownerTabId=null;
       }
-    }
-    if (changed) await save(entries);
+    });
     const data=await chrome.storage.local.get('serverByTab');
     const servers=data.serverByTab || {};
     delete servers[tabId];
@@ -568,14 +762,12 @@ chrome.tabs.onUpdated.addListener((tabId,changes) => {
     const key=chatKey(changes.url);
     const connection=connections.get(Number(tabId));
     if (connection && connection.key!==key) disconnect(tabId);
-    const entries=await storage();
-    let changed=false;
-    for (const [oldKey,record] of Object.entries(entries)) {
-      if (Number(record.ownerTabId)===Number(tabId) && oldKey!==key) {
-        record.ownerTabId=null;changed=true;
+    await updateRecords(entries=>{
+      for(const [oldKey,record] of Object.entries(entries)){
+        if(record.ownerTabId!=null && Number(record.ownerTabId)===Number(tabId) && oldKey!==key)
+          record.ownerTabId=null;
       }
-    }
-    if (changed) await save(entries);
+    });
     await resumeAll();
   })().catch(error=>console.warn('Agent Network navigation:',String(error)));
 });
