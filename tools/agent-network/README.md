@@ -146,6 +146,17 @@ uses separate curved lanes; self-messages use external loops. A label shows
 N seconds ago for recent messages, N minutes for messages up to 10 minutes old,
 and no time beyond 10 minutes. Select an agent to view its task,
 last MCP activity, inbox size, status and wake adapters.
+
+The **Карта взаимодействий** has a **Команды** multi-select filter. It starts
+at **Все команды**, or restores the previous choice from the browser's local
+storage. Select one or more team names to show the **union** of their agents;
+agents belonging to multiple selected teams appear only once. The map draws
+only message arrows whose **sender and recipient are both visible**. A team
+with no agents shows an empty-state hint; **Все команды** resets the filter.
+The selection survives the dashboard's three-second polling cycle without
+closing the team chooser. **Only the map is filtered**: server metrics, agent
+table, the inspector, and message history remain global administrator views.
+
 Tables below show the agent pool, adapters and message events. Neither message
 bodies nor authentication tokens appear in the dashboard.
 

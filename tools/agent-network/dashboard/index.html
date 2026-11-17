@@ -62,13 +62,24 @@
             </div>
           </div>
         </div>
+        <div class="graph-team-filter" aria-label="Фильтр команд карты">
+          <span class="graph-filter-caption">Команды</span>
+          <details id="graph-team-select" class="graph-team-select">
+            <summary id="graph-team-summary" title="Фильтр карты по командам">Все команды</summary>
+            <div class="graph-team-menu">
+              <button type="button" id="graph-teams-all" class="graph-team-all" aria-pressed="true">Все команды</button>
+              <div id="graph-team-options" class="graph-team-options" role="group" aria-label="Выбор команд"></div>
+            </div>
+          </details>
+          <span id="graph-filter-hint" class="graph-filter-hint">Все агенты</span>
+        </div>
         <div class="graph-frame" id="graph-frame">
           <div class="graph-grid"></div>
           <svg id="graph" viewBox="0 0 900 415" role="img" aria-label="Граф взаимодействий агентов"></svg>
           <div id="graph-empty" class="graph-empty" hidden>
             <span class="empty-glyph">◇</span>
-            <strong>Пока нет подключённых агентов</strong>
-            <span>После регистрации агент появится на карте.</span>
+            <strong id="graph-empty-title">Пока нет подключённых агентов</strong>
+            <span id="graph-empty-description">После регистрации агент появится на карте.</span>
           </div>
         </div>
         <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>

@@ -66,7 +66,20 @@
     };
   }
 
-  const api = {edgeAge, edgeGeometry, layoutGrid};
+  // A multi-team agent appears once (union), and only links whose endpoints
+  // are both visible remain in the map. Empty selection means no filter.
+  function filterByTeams(data, selectedTeamIds) {
+    const teams = new Set(selectedTeamIds || []);
+    if (!teams.size) return data;
+    const agents = data.agents.filter(agent =>
+      (agent.teams || []).some(team => teams.has(team.team_id)));
+    const visible = new Set(agents.map(agent => agent.agent_id));
+    const edges = data.edges.filter(edge =>
+      visible.has(edge.source) && visible.has(edge.target));
+    return {...data, agents, edges};
+  }
+
+  const api = {edgeAge, edgeGeometry, layoutGrid, filterByTeams};
   globalThis.AgentNetworkGraph = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

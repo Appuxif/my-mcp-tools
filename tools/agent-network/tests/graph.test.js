@@ -62,3 +62,31 @@ test('grid layout scales without node collisions for 12, 40 and 90 agents', () =
     }
   }
 });
+
+
+test('team map filter shows union of members, keeps common agents once and clips edges',()=>{
+  const {filterByTeams}=require('../dashboard/graph-utils.js');
+  const agents=[
+    {agent_id:'A',teams:[{team_id:'alpha'}]},
+    {agent_id:'B',teams:[{team_id:'beta'}]},
+    {agent_id:'C',teams:[{team_id:'alpha'},{team_id:'beta'}]},
+    {agent_id:'D',teams:[{team_id:'default'}]},
+  ];
+  const edges=[
+    {source:'A',target:'C'}, {source:'B',target:'C'},
+    {source:'D',target:'A'}, {source:'C',target:'C'},
+  ];
+  const original={agents,edges,metrics:{agents_total:4}};
+  assert.equal(filterByTeams(original,new Set()),original,'empty set means all teams');
+  const alpha=filterByTeams(original,['alpha']);
+  assert.deepEqual(alpha.agents.map(x=>x.agent_id),['A','C']);
+  assert.deepEqual(alpha.edges.map(x=>x.source+'>'+x.target),['A>C','C>C']);
+  const both=filterByTeams(original,['alpha','beta']);
+  assert.deepEqual(both.agents.map(x=>x.agent_id),['A','B','C']);
+  assert.deepEqual(both.edges.map(x=>x.source+'>'+x.target),['A>C','B>C','C>C']);
+  assert.equal(both.metrics,original.metrics,'global metadata is untouched');
+  assert.equal(original.agents.length,4,'source snapshot not mutated');
+  const empty=filterByTeams(original,['unused']);
+  assert.deepEqual(empty.agents,[]);
+  assert.deepEqual(empty.edges,[]);
+});

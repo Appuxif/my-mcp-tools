@@ -40,6 +40,71 @@
   // Keep the user's unsaved edits across live 5-second dashboard refreshes.
   const teamDrafts=new Map();
   const teamName = value => String(value||'').trim().toLocaleLowerCase();
+  // The team filter affects only the map. No selected teams means "all".
+  // Persist the choice locally so periodic polling and page reloads retain it.
+  const graphFilterStorageKey = 'agentNetwork.graph.selectedTeams';
+  const selectedGraphTeams = new Set();
+  try {
+    const saved = JSON.parse(localStorage.getItem(graphFilterStorageKey) || '[]');
+    if (Array.isArray(saved) && saved.length <= 100)
+      saved.filter(id => typeof id === 'string').forEach(id => selectedGraphTeams.add(id));
+  } catch { /* A blocked or corrupt localStorage must not break the map. */ }
+  let graphTeamOptionsSignature = '';
+  const graphTeamCheckboxes = new Map();
+  const persistGraphTeams = () => {
+    try { localStorage.setItem(graphFilterStorageKey, JSON.stringify([...selectedGraphTeams])); }
+    catch { /* Preference persistence is optional. */ }
+  };
+  const syncGraphTeamSelection = teams => {
+    const selected = teams.filter(team => selectedGraphTeams.has(team.team_id));
+    const names = selected.map(team => team.name);
+    const summary = $('graph-team-summary');
+    summary.textContent = !names.length ? 'Все команды' :
+      names.length === 1 ? names[0] : 'Выбрано команд: ' + names.length;
+    summary.title = names.length ? names.join(', ') : 'Показать агентов всех команд';
+    $('graph-teams-all').setAttribute('aria-pressed', String(!names.length));
+    for (const [teamId, checkbox] of graphTeamCheckboxes)
+      checkbox.checked = selectedGraphTeams.has(teamId);
+  };
+  const updateGraphTeamOptions = data => {
+    const teams = data.teams || [];
+    const available = new Set(teams.map(team => team.team_id));
+    const before = selectedGraphTeams.size;
+    for (const id of selectedGraphTeams)
+      if (!available.has(id)) selectedGraphTeams.delete(id);
+    if (before !== selectedGraphTeams.size) persistGraphTeams();
+    const signature = JSON.stringify(teams.map(team => [team.team_id, team.name]));
+    if (signature !== graphTeamOptionsSignature) {
+      graphTeamOptionsSignature = signature;
+      graphTeamCheckboxes.clear();
+      const container = $('graph-team-options');
+      container.replaceChildren();
+      for (const team of teams) {
+        const label = add(container, 'label', 'graph-team-option');
+        const checkbox = add(label, 'input', '');
+        checkbox.type = 'checkbox';
+        checkbox.value = team.team_id;
+        add(label, 'span', '', team.name);
+        checkbox.addEventListener('change', () => {
+          if (checkbox.checked) selectedGraphTeams.add(team.team_id);
+          else selectedGraphTeams.delete(team.team_id);
+          persistGraphTeams();
+          syncGraphTeamSelection(teams);
+          if (snapshot) graph(snapshot);
+        });
+        graphTeamCheckboxes.set(team.team_id, checkbox);
+      }
+    }
+    syncGraphTeamSelection(teams);
+  };
+  $('graph-teams-all').addEventListener('click', () => {
+    selectedGraphTeams.clear();
+    persistGraphTeams();
+    if (snapshot) {
+      syncGraphTeamSelection(snapshot.teams || []);
+      graph(snapshot);
+    }
+  });
   let inflight = false;
   let graphZoom = 1;
   let graphDimensions = {width:900,height:415};
@@ -81,11 +146,23 @@
   function graph(data) {
     const svg = $('graph');
     svg.replaceChildren();
-    const agents = data.agents;
+    const view = AgentNetworkGraph.filterByTeams(data, selectedGraphTeams);
+    const agents = view.agents;
+    const edges = view.edges;
+    const filtered = selectedGraphTeams.size > 0;
     $('graph-empty').hidden = !!agents.length;
+    $('graph-empty-title').textContent = filtered && data.agents.length
+      ? 'Нет агентов в выбранных командах' : 'Пока нет подключённых агентов';
+    $('graph-empty-description').textContent = filtered && data.agents.length
+      ? 'Выберите другую команду или верните «Все команды».'
+      : 'После регистрации агент появится на карте.';
+    $('graph-filter-hint').textContent = filtered
+      ? fmt(agents.length) + ' из ' + fmt(data.agents.length) + ' агентов'
+      : 'Все агенты';
     $('graph-summary').textContent = agents.length
-      ? fmt(agents.length) + ' узлов · ' + fmt(data.edges.length) + ' связей'
-      : 'Ожидание регистрации первого агента';
+      ? fmt(agents.length) + ' узлов · ' + fmt(edges.length) + ' связей'
+      : filtered && data.agents.length ? 'Нет агентов по фильтру'
+        : 'Ожидание регистрации первого агента';
     if (!agents.length) {
       graphDimensions = {width:900,height:415};
       applyGraphZoom();
@@ -121,8 +198,8 @@
     pendingArrow.append(newSvg('path', {d:'M0 0 L7 3.5 L0 7 z', fill:'#e9b878'}));
     defs.append(arrow, pendingArrow);
     svg.append(defs);
-    const activePairs = new Set(data.edges.map(e => e.source + ':' + e.target));
-    data.edges.forEach(edge => {
+    const activePairs = new Set(edges.map(e => e.source + ':' + e.target));
+    edges.forEach(edge => {
       const a = positions.get(edge.source), b = positions.get(edge.target);
       if (!a || !b) return;
       const reciprocal = activePairs.has(edge.target + ':' + edge.source);
@@ -400,6 +477,7 @@
     $('metric-messages').textContent = fmt(m.messages_24h);
     $('metric-adapters').textContent = fmt(m.channels_connected);
     $('uptime').textContent = formatUptime(data.server.uptime_seconds);
+    updateGraphTeamOptions(data);
     graph(data);
     inspector(data);
     agentsTable(data);

@@ -231,3 +231,23 @@ body.chat-open{overflow:hidden}
 .team-editor-save{width:100%;margin-top:9px}
 .team-editor-save:disabled{opacity:.5;cursor:not-allowed}
 .team-editor-status{font-size:11px;color:var(--amber);overflow-wrap:anywhere;margin-top:6px}
+
+/* Map-only team filter: the native details menu remains open during refresh. */
+.graph-team-filter{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 22px 14px;position:relative;z-index:3}
+.graph-filter-caption{font-size:11px;font-weight:700;color:#a6b8cd}
+.graph-team-select{position:relative;min-width:170px;max-width:min(100%,350px)}
+.graph-team-select>summary{list-style:none;cursor:pointer;border:1px solid #35536a;background:#17293b;border-radius:7px;padding:7px 29px 7px 11px;font-size:12px;font-weight:600;color:#d5e8f8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;position:relative}
+.graph-team-select>summary::-webkit-details-marker{display:none}
+.graph-team-select>summary::after{content:'⌄';position:absolute;right:10px;top:5px;color:var(--cyan);font-size:16px}
+.graph-team-select[open]>summary,.graph-team-select>summary:focus-visible{outline:2px solid #46dfce55;outline-offset:2px}
+.graph-team-menu{position:absolute;top:calc(100% + 5px);left:0;width:max(215px,100%);max-width:min(330px,90vw);max-height:300px;overflow:auto;background:#101c2c;border:1px solid #35536a;border-radius:9px;box-shadow:0 12px 35px #0009;padding:7px;z-index:4}
+.graph-team-all{display:block;width:100%;text-align:left;padding:9px 11px;border:0;border-radius:6px;background:transparent;color:#d3e4fa;font-size:12px;font-weight:600;cursor:pointer}
+.graph-team-all[aria-pressed="true"]{background:#1b4147;color:var(--cyan)}
+.graph-team-options{border-top:1px solid var(--line-soft);padding-top:5px;margin-top:5px}
+.graph-team-option{display:flex;gap:9px;align-items:center;min-width:0;border-radius:6px;padding:8px 10px;font-size:12px;color:#d2dff0;cursor:pointer}
+.graph-team-option:hover,.graph-team-all:hover{background:#20364a}
+.graph-team-option input{accent-color:#46dfce;flex:none;cursor:pointer}
+.graph-team-option span{overflow-wrap:anywhere}
+.graph-team-option small{margin-left:auto;font-size:10px;color:#8196ac;flex:none}
+.graph-filter-hint{font-size:10px;color:#879bb1}
+@media(max-width:700px){.graph-team-filter{padding:0 15px 12px}.graph-team-select{min-width:150px}.graph-filter-hint{width:100%}}

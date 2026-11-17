@@ -7,7 +7,7 @@ const Graph=require('../dashboard/graph-utils.js');
 
 const src=fs.readFileSync(path.join(__dirname,'../dashboard/dashboard.js'),'utf8');
 
-function harness() {
+function harness({graphNetwork=null,savedTeams=null}={}) {
   class El {
     constructor(tag='div') {
       this.tagName=tag.toUpperCase();this.id='';this.className='';
@@ -42,16 +42,23 @@ function harness() {
   };
   let memberNames=['default'];
   const requests=[];
+  const preferences=new Map();
+  if(savedTeams!==null) preferences.set('agentNetwork.graph.selectedTeams',JSON.stringify(savedTeams));
+  const localStorage={
+    getItem(key){return preferences.get(key)??null;},
+    setItem(key,value){preferences.set(key,String(value));},
+  };
   const snapshot=()=>({
     agents:[{
       agent_id:'A',name:'Worker',kind:'chatgpt',role:'Developer',
       teams:memberNames.map(name=>({team_id:name,name})),
       online:true,task_status:'idle',pending_messages:0,
     }],
-    teams:[{team_id:'default',name:'default'},{team_id:'dev',name:'Dev'}],
-    edges:[],channels:[],recent:[],server:{uptime_seconds:10},
-    metrics:{agents_total:1,agents_working:0,agents_online:1,
-             pending_messages:0,messages_24h:0,channels_connected:0},
+    teams:graphNetwork?.teams || [{team_id:'default',name:'default'},{team_id:'dev',name:'Dev'}],
+    edges:graphNetwork?.edges || [],channels:[],recent:[],server:{uptime_seconds:10},
+    metrics:{agents_total:graphNetwork?.agents.length || 1,agents_working:0,
+             agents_online:1,pending_messages:0,messages_24h:0,channels_connected:0},
+    ...(graphNetwork ? {agents:graphNetwork.agents} : {}),
   });
   const fetch=async(url,options={})=>{
     requests.push({url:String(url),options});
@@ -66,7 +73,7 @@ function harness() {
   };
   const ctx=vm.createContext({
     document,fetch,URL,location:{origin:'http://127.0.0.1:8787'},
-    console,AgentNetworkGraph:Graph,setInterval(){},
+    console,AgentNetworkGraph:Graph,localStorage,setInterval(){},
     CustomEvent:class {constructor(type,options){this.type=type;this.detail=options?.detail;}},
   });
   vm.runInContext(src,ctx);
@@ -79,7 +86,8 @@ function harness() {
     return null;
   };
   const flush=async()=>{for(let i=0;i<10;i++)await new Promise(r=>setImmediate(r));};
-  return {get,find,flush,document,requests,memberNames:()=>memberNames};
+  return {get,find,flush,document,requests,preferences,
+    memberNames:()=>memberNames};
 }
 
 test('Dashboard inspector assigns and removes team memberships via Basic-authenticated admin API',async()=>{
@@ -113,4 +121,91 @@ test('Dashboard unsaved team input survives automatic data refresh',async()=>{
   h.document.dispatchEvent({type:'agent-network:refresh'});
   await h.flush();
   assert.equal(h.find(h.get('inspector'),'team-editor-input').value,'New Team');
+});
+
+
+const NETWORK={
+  teams:[
+    {team_id:'default',name:'default'}, {team_id:'alpha',name:'Forest Chopper'},
+    {team_id:'beta',name:'My MCP Tools'}, {team_id:'unused',name:'Empty Team'},
+  ],
+  agents:[
+    {agent_id:'A',name:'Alpha',kind:'chatgpt',role:'Developer',teams:[{team_id:'alpha'}]},
+    {agent_id:'B',name:'Beta',kind:'other',role:'Reviewer',teams:[{team_id:'beta'}]},
+    {agent_id:'C',name:'Shared',kind:'chatgpt',role:'Tester',teams:[{team_id:'alpha'},{team_id:'beta'}]},
+    {agent_id:'D',name:'Default',kind:'other',role:'Worker',teams:[{team_id:'default'}]},
+  ],
+  edges:[
+    {source:'A',target:'C',recent_count:1,pending_count:0,last_message_at:1},
+    {source:'B',target:'C',recent_count:1,pending_count:0,last_message_at:1},
+    {source:'D',target:'A',recent_count:1,pending_count:0,last_message_at:1},
+  ],
+};
+function mapNodeNames(h) {
+  return h.get('graph').children.filter(node=>
+    node.attributes?.class?.split(' ').includes('node')
+  ).map(node=>node.attributes['aria-label'].split(',')[0]);
+}
+function chooseTeam(h,name,checked=true) {
+  const row=h.get('graph-team-options').children.find(label=>
+    label.children[1].textContent===name);
+  assert.ok(row,'team option exists: '+name);
+  const box=row.children[0];
+  box.checked=checked;
+  for(const listener of box.listeners.change||[])listener();
+  return box;
+}
+
+test('map defaults to all agents and filters selected teams as union, not intersection',async()=>{
+  const h=harness({graphNetwork:NETWORK});
+  await h.flush();
+  assert.deepEqual(mapNodeNames(h),['Alpha','Beta','Shared','Default']);
+  assert.equal(h.get('graph-team-summary').textContent,'Все команды');
+  assert.equal(h.get('graph-summary').textContent,'4 узлов · 3 связей');
+  assert.equal(h.get('agents-count').textContent,'4');
+  chooseTeam(h,'Forest Chopper');
+  assert.deepEqual(mapNodeNames(h),['Alpha','Shared']);
+  assert.equal(h.get('graph-summary').textContent,'2 узлов · 1 связей');
+  assert.equal(h.get('graph-team-summary').textContent,'Forest Chopper');
+  chooseTeam(h,'My MCP Tools');
+  assert.deepEqual(mapNodeNames(h),['Alpha','Beta','Shared']);
+  assert.equal(h.get('graph-summary').textContent,'3 узлов · 2 связей');
+  assert.equal(h.get('graph-team-summary').textContent,'Выбрано команд: 2');
+  assert.equal(h.get('agents-count').textContent,'4','table is not filtered');
+  assert.equal(h.get('metric-agents').textContent,'4','server metrics are not filtered');
+  chooseTeam(h,'Forest Chopper',false);
+  assert.deepEqual(mapNodeNames(h),['Beta','Shared']);
+  h.get('graph-teams-all').click();
+  assert.deepEqual(mapNodeNames(h),['Alpha','Beta','Shared','Default']);
+  assert.equal(h.get('graph-team-summary').textContent,'Все команды');
+});
+
+test('map shows distinct empty-filter message and preserves selection on refresh',async()=>{
+  const h=harness({graphNetwork:NETWORK});
+  await h.flush();
+  chooseTeam(h,'Empty Team');
+  assert.deepEqual(mapNodeNames(h),[]);
+  assert.equal(h.get('graph-empty').hidden,false);
+  assert.match(h.get('graph-empty-title').textContent,/Нет агентов/);
+  assert.equal(h.get('graph-filter-hint').textContent,'0 из 4 агентов');
+  assert.equal(h.get('agents-count').textContent,'4');
+  const option=h.get('graph-team-options').children.at(-1);
+  h.get('graph-team-select').open=true;
+  h.document.dispatchEvent({type:'agent-network:refresh'});
+  await h.flush();
+  assert.equal(h.get('graph-team-options').children.at(-1),option,
+    'do not rebuild open menu on polling');
+  assert.equal(h.get('graph-team-select').open,true);
+  assert.equal(option.children[0].checked,true);
+  assert.deepEqual(JSON.parse(h.preferences.get('agentNetwork.graph.selectedTeams')),['unused']);
+});
+
+test('map restores saved filter across page reload, drops missing team IDs',async()=>{
+  const h=harness({graphNetwork:NETWORK,savedTeams:['alpha','deleted-team']});
+  await h.flush();
+  assert.deepEqual(mapNodeNames(h),['Alpha','Shared']);
+  assert.deepEqual(JSON.parse(h.preferences.get('agentNetwork.graph.selectedTeams')),['alpha']);
+  h.get('graph-teams-all').click();
+  assert.deepEqual(JSON.parse(h.preferences.get('agentNetwork.graph.selectedTeams')),[]);
+  assert.deepEqual(mapNodeNames(h),['Alpha','Beta','Shared','Default']);
 });
