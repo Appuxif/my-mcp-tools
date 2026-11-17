@@ -5,12 +5,17 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 function createBackground() {
-  const data = {agentsByTab:{}, serverByTab:{}};
+  const key='https://chatgpt.com/c/test';
+  const data = {agentsByChat:{}, serverByTab:{}};
   const event = {addListener() {}};
   const chrome = {
     webRequest: {onBeforeRequest:event, onCompleted:event, onErrorOccurred:event},
     runtime: {onMessage:event, onStartup:event, onInstalled:event},
-    tabs: {onRemoved:event, onUpdated:event},
+    tabs:{
+      onRemoved:event,onUpdated:event,
+      async get(id){return {id,url:key};},
+      async query(){return [{id:9,url:key}]},
+    },
     alarms: {create() {}, onAlarm:event},
     storage: {local:{
       async get(keys) {
@@ -18,7 +23,8 @@ function createBackground() {
           return Object.fromEntries(keys.filter(k => k in data).map(k => [k,data[k]]));
         return typeof keys === 'string' ? {[keys]:data[keys]} : data;
       },
-      async set(update) {Object.assign(data,update);}
+      async set(update) {Object.assign(data,update);},
+      async remove(key){delete data[key];}
     }}
   };
   const context = vm.createContext({
@@ -32,7 +38,7 @@ function createBackground() {
   const script = fs.readFileSync(path.join(__dirname,'../extension/background.js'),'utf8');
   vm.runInContext(script, context);
   const evaluate = expression => vm.runInContext(expression,context);
-  return {data,evaluate};
+  return {data,evaluate,key};
 }
 
 test('server URLs accept HTTPS remotes, HTTP loopback/private only', () => {
@@ -55,18 +61,22 @@ test('server URLs accept HTTPS remotes, HTTP loopback/private only', () => {
 });
 
 test('server is saved per tab and an inactive identity is reset on change', async () => {
-  const {data,evaluate} = createBackground();
+  const {data,evaluate,key} = createBackground();
   await evaluate("setServer(9, 'https://agents.example.com')");
   assert.equal(data.serverByTab[9], 'https://agents.example.com');
   assert.equal(data.defaultServer, 'https://agents.example.com');
-  data.agentsByTab[9] = {name:'test',active:false,server:'https://agents.example.com'};
+  data.agentsByChat[key] = {
+    name:'test',active:false,chatUrl:key,server:'https://agents.example.com'
+  };
   await evaluate("setServer(9, 'http://127.0.0.1:8787')");
-  assert.equal(data.agentsByTab[9], undefined);
+  assert.equal(data.agentsByChat[key], undefined);
   assert.equal(data.serverByTab[9], 'http://127.0.0.1:8787');
-  data.agentsByTab[9] = {name:'test',active:true,server:'http://127.0.0.1:8787'};
+  data.agentsByChat[key] = {
+    name:'test',active:true,chatUrl:key,server:'http://127.0.0.1:8787'
+  };
   await assert.rejects(evaluate("setServer(9, 'https://agents.example.com')"));
   assert.equal(data.serverByTab[9], 'http://127.0.0.1:8787');
-  assert.equal(data.agentsByTab[9].name,'test');
+  assert.equal(data.agentsByChat[key].name,'test');
 });
 
 test('popup validates server origins before requesting Chrome permission', () => {

@@ -228,44 +228,67 @@ Do not expose this administrator-only feature through a public proxy.
 5. The extension sends a one-time identity prompt to ChatGPT. Subsequent wake
    events send only a "read your messages via MCP" prompt, not message bodies.
 
-Each tab stores its selected server and identity in `chrome.storage.local`.
-The last-used server becomes the default for newly configured tabs. To change
-the server of an active agent, stop it first; after switching, the old token
-and identity are not reused for a different server.
+The agent identity is stored in `chrome.storage.local` under the **ChatGPT
+conversation ID**, not the Chrome tab ID. Both normal links such as
+`https://chatgpt.com/c/<conversation-id>` and project-scoped links such as
+`https://chatgpt.com/g/<project-id>/c/<conversation-id>` resolve to the **same
+agent**. Opening that chat in a second tab automatically restores its name,
+role, credentials and registration in the popup, without sending a second
+bootstrap identity prompt.
+
+One browser tab owns the **PUSH WebSocket per conversation**. Opening more
+tabs does not create duplicate wakes. On closing or navigating away from the
+owner, another open tab for the same conversation may take over; if all tabs
+are closed, the identity remains stored and resumes when the chat is reopened.
+Existing `agentsByTab` records from older versions are migrated once to
+`agentsByChat`. Identities already deleted by an older extension when their
+last tab closed cannot be recovered without their original credentials.
+
+Server selection may be configured per tab, but the registered agent's server
+is pinned to the conversation identity. The last-used server is the default
+for new conversations. To change an active agent's server, stop it first;
+the old token and identity are never reused on another server.
 
 The wake channel sends a WebSocket heartbeat every 20 seconds and only
 submits a prompt to a stable, empty, idle ChatGPT conversation.
 
-### Floating per-conversation HUD (Chrome extension v0.3)
+### Floating per-conversation HUD (Chrome extension v0.4.0)
 
-The extension now adds a **read-only floating status card** to each registered
-ChatGPT conversation. It appears automatically: there is no need to open the
-extension popup after an agent has been started. Chats without a registered
-agent remain unchanged. Each card shows only the metadata of the agent bound
-to **that tab**, including:
+The floating status card is now **opt-in**. Pressing **Start** registers
+the agent and sends its bootstrap identity prompt, but **does not show**
+any overlay. The card is also hidden by default when a registered chat is
+opened, restored or duplicated in another browser tab.
 
-- Current ChatGPT UI state, role, task, and whether the PUSH channel is linked.
-- Number of unread incoming messages and number of messages sent in the past
-  24 hours. If the server caps the graph at 100 distinct relationships, the
-  outgoing count is visibly marked as a **lower bound**.
-- Last outgoing recipient, last incoming sender, when each interaction
-  happened, and the delivery status of the latest outgoing message when
-  this is present in the server's short metadata history.
-- Last MCP activity, task status, and most recent wake attempt.
+To display the status card, open the extension popup in the desired chat
+and click **◈ Показать плавающее окно**. This button becomes enabled when
+the conversation has a registered agent. If the required content scripts are
+not yet installed in that tab, the extension injects them on demand.
+Pressing Show again expands a minimized card. Use the card's **×** button
+to minimize it to a small ◈ badge; after reloading the page it remains absent
+until the Show button is pressed again.
 
-The card refreshes about every **12 seconds while the tab is visible**. All
-agent tabs maintain a short-lived **per-agent** worker cache. The HUD does
-not poll native MCP or ACK messages. It reads only its own authenticated
-`GET /api/v1/agents/hud` endpoint using its agent's private token inside the
-extension worker, never the administrator dashboard API. The endpoint returns
-no message bodies, unrelated agents' tasks or agent secrets. The extension
-does not inject credentials or messages into the ChatGPT page.
+The card displays only the data of the agent identified by the current
+**conversation ID**, never an arbitrary tab's identity:
 
-You can **drag** the header, **collapse** to a compact header, or **hide**
-the card as a small ◈ icon. The icon still shows a pending-message badge,
-and clicking it restores the card. The layout preference is stored per agent
-in extension local storage. The **↗ Dashboard** button opens that agent's
-server dashboard.
+- Current ChatGPT UI state, role, task, and PUSH connection status.
+- Number of incoming pending messages and messages sent in the last 24 hours.
+  When more than 100 distinct relationships exist, the outgoing total is
+  explicitly marked as a lower bound.
+- Last outgoing recipient, last incoming sender, time of each interaction,
+  and delivery state when recent metadata is available.
+- Last MCP activity, task status and most recent wake attempt.
+
+While the card is visible, it refreshes about every **12 seconds**. It
+does **not** poll or create page elements in the background when hidden.
+The HUD uses the per-agent authenticated `GET /api/v1/agents/hud` endpoint,
+not the administrator dashboard. Private credentials remain inside the
+extension worker; message bodies are not included in the status response.
+
+You can **drag** the header, **collapse** it to a compact title bar or
+**minimize** it to an icon with a pending-message badge. The icon can be
+clicked to restore the visible card during the same page session. Position
+and layout preference are stored per agent. The **↗ Dashboard** button
+opens the server dashboard.
 
 ### Private conversation viewer in each ChatGPT tab
 

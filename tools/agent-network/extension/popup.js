@@ -11,6 +11,7 @@ async function refresh() {
   try {
     const s = await request('network:status');
     $('server').value = s.server;
+    $('show-hud').disabled = !s.entry;
     if (s.entry) {
       for (const field of fields) $(field).value = s.entry[field] || '';
       $('name').disabled = true;
@@ -69,6 +70,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('open-dashboard').addEventListener('click', async () => {
     try { await request('network:open-dashboard'); }
     catch (e) { show(String(e.message || e)); }
+  });
+  $('show-hud').addEventListener('click', async () => {
+    $('show-hud').disabled=true;
+    try {
+      await request('network:show-hud');
+      show('Плавающее окно открыто для этой беседы.');
+    } catch (e) { show(String(e.message || e)); }
+    finally { $('show-hud').disabled=false; }
   });
   $('start').addEventListener('click', async () => {
     $('start').disabled = true;

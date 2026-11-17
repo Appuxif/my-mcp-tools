@@ -34,9 +34,22 @@ The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-
 
 1. Connect `agent-network` to ChatGPT through My MCP Tools. Open the intended existing conversation at `chatgpt.com/.../c/...`.
 2. In the extension popup, choose the server (local default `http://127.0.0.1:8787`), set the agent name, role, and description, then click **Start** (the button label may be localized).
-3. The extension registers that specific tab, stores its per-tab identity in `chrome.storage.local`, and sends a bootstrap message to ChatGPT with `agent_id` and `token`. Do not register again if the bootstrap already supplied the credentials.
+3. The extension registers a **conversation ID**, not a tab ID. For example,
+   `chatgpt.com/c/<id>` and `chatgpt.com/g/<project>/c/<id>` refer to the same
+   agent if their final conversation IDs match. Credentials and profile data
+   persist in `chrome.storage.local` as `agentsByChat`; existing `agentsByTab`
+   entries migrate automatically. The original bootstrap supplies the agent
+   identity once; reopening the same chat in a new tab doesn't register or
+   bootstrap another agent. Only one tab owns its PUSH WebSocket at a time,
+   and another tab can take over after the owner closes.
 4. The extension monitors the DOM (composer, Stop generating, text drafts, file/image attachments and uploading files) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
 5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, attachment or upload, and the conversation URL has not changed. If the attachment region is absent, wake is blocked rather than risking a file upload. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
+
+The floating HUD is **manual**, not automatic: pressing **Start** registers
+the agent but does not display an overlay. Open the extension popup in the
+registered conversation and choose the **Show floating panel** button (Russian UI: Show HUD) to add it to
+that page. Registered chats reopened in another tab still show the same
+name and role in the popup but keep the HUD hidden until explicitly shown.
 
 The extension never forwards incoming message bodies. Its floating HUD uses the per-agent authenticated `GET /api/v1/agents/hud` endpoint, not the administrator API. To open the entire dashboard, log in with HTTP Basic (username `admin`, password from private `admin-token`). Do not confuse its wake prompt with `send_message`. ChatGPT's UI and internal network calls can change, so this is a best-effort mechanism rather than an SLA. Closed tabs, disabled extensions, changed DOM structures, network failures, and model limits can prevent the wake.
 

@@ -51,7 +51,14 @@ function chat({attached=false, fileSelected=false, attachAfterInsert=false, text
   globals.globalThis=globals;
   vm.runInNewContext(code,globals);
   const run=message => new Promise(resolve => listener(message,null,resolve));
-  return {run,clicks:()=>clicks};
+  return {
+    run,clicks:()=>clicks,
+    unrelated(messageType){
+      let responded=false;
+      const accepted=listener({type:messageType},null,()=>{responded=true;});
+      return {accepted,responded};
+    }
+  };
 }
 
 test('wake refuses an attached file even when composer text is empty',async()=>{
@@ -85,4 +92,11 @@ test('plain idle composer without attachments is still wakeable',async()=>{
   const response=await page.run({type:'agent:send',text:'Wake',url:'https://chatgpt.com/c/test'});
   assert.equal(response.ok,true);
   assert.equal(page.clicks(),1);
+});
+
+test('ChatGPT composer content script does not steal HUD Start messages',()=>{
+  const page=chat();
+  const result=page.unrelated('network:hud-show');
+  assert.equal(result.accepted,false);
+  assert.equal(result.responded,false);
 });

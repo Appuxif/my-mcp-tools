@@ -21,6 +21,8 @@
   let position = null;
   let dragging = null;
   let polling = false;
+  let refreshRequested = false;
+  let revealGeneration = 0;
   let current = null;
   let viewerOpen = false;
   let viewerGeneration = 0;
@@ -425,10 +427,10 @@
     current=data;
     text('name',data.name || 'Agent Network',data.name || '');
     const status=data.status;
-    text('role',status?.role || '');
+    text('role',status?.role || data.role || '');
     const ui=data.active ? data.ui || 'unknown' : 'stopped';
     const badge=el('ui-state');
-    badge.textContent= !data.active ? 'Остановлен' :
+    badge.textContent= data.loading ? 'Подключаюсь…' : !data.active ? 'Остановлен' :
       data.error ? 'Нет связи' : labels[ui] || labels.unknown;
     badge.className='status-pill'+(!data.active || data.error ? ' off' :
       ui === 'busy' || ui === 'draft' ? ' warn' : '');
@@ -453,21 +455,32 @@
     text('mcp',status ? ago(status.lastMcp) : '—');
     text('wake',status ? ago(status.lastWake) : '—');
     const alert=el('alert');
-    alert.hidden=!data.error && !!status;
+    alert.hidden=!!data.loading || (!data.error && !!status);
     if(!alert.hidden) alert.textContent=data.error
       ? 'Сервер недоступен' : 'Агент не найден на сервере. Проверьте регистрацию.';
     text('updated',data.updatedAt ? 'Обновлено '+ago(data.updatedAt/1000) : 'Загрузка…');
   }
 
   async function poll() {
-    if(polling || document.hidden) return;
+    // A registered agent doesn't imply permission to display an overlay.
+    // Only an explicit popup Show action creates/unhides the HUD.
+    if(!host || host.hidden) return;
+    if(polling) {
+      refreshRequested = true;
+      return;
+    }
+    if(document.hidden) return;
     if(!location.pathname.includes('/c/')) {
       if(host) { closeViewer(); host.hidden=true; }
       return;
     }
     polling=true;
+    const requestedGeneration = revealGeneration;
     try {
       const response=await chrome.runtime.sendMessage({type:'network:hud-status'});
+      // A Start signal can arrive while a previous pre-registration poll is
+      // in flight. Never let that stale response hide the newly shown panel.
+      if (requestedGeneration !== revealGeneration) return;
       if(!response?.ok || !response.visible || response.chatUrl !== location.href) {
         if(host) { closeViewer(); host.hidden=true; }
         return;
@@ -494,12 +507,57 @@
         draw({...current,error:'Network unavailable',status:null,
               connected:false,updatedAt:Date.now()});
       }
-    } finally { polling=false; }
+    } finally {
+      polling=false;
+      if(refreshRequested) {
+        refreshRequested=false;
+        void poll();
+      }
+    }
   }
 
-  function start() {
+  async function showOnStart(message) {
+    if (!message?.agentId || !message?.name ||
+        message.chatUrl !== location.href || !location.pathname.includes('/c/'))
+      return {ok:false, error:'Wrong conversation or missing agent identity'};
+    // Immediate placeholder: it does not depend on the HUD API succeeding or
+    // on a periodic refresh. No agent secret is sent to the content script.
+    const generation = ++revealGeneration;
+    create();
+    if (!host) return {ok:false, error:'Page is not ready'};
+    if (agentId !== message.agentId) {
+      closeViewer();
+      agentId = message.agentId;
+      position = null;
+      await loadPreferences(agentId);
+      if (generation !== revealGeneration || location.href !== message.chatUrl)
+        return {ok:false, error:'Conversation changed'};
+    }
+    boundChatUrl = message.chatUrl;
+    changeMode('full'); // Explicit Show restores a previously minimized HUD.
+    draw({
+      name:message.name, role:message.role || '', agentId:message.agentId,
+      active:true, connected:false, ui:'unknown',
+      status:null, loading:true, updatedAt:Date.now(),
+    });
+    host.hidden=false;
     void poll();
-    setInterval(() => void poll(),12000);
+    return {ok:true};
+  }
+
+  chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    if (message?.type !== 'network:hud-show') return false;
+    void showOnStart(message)
+      .then(respond)
+      .catch(error => respond({ok:false,error:String(error.message || error)}));
+    return true;
+  });
+
+  function start() {
+    // Never show a HUD merely because the page loads or an agent starts.
+    setInterval(() => {
+      if (host && !host.hidden) void poll();
+    },POLL_MS);
     window.addEventListener('popstate',() => void poll());
     window.addEventListener('hashchange',() => void poll());
     document.addEventListener('visibilitychange',() => {

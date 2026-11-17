@@ -7,12 +7,16 @@ const AgentNetworkStatus = require('../extension/agent-status.js');
 
 const script = fs.readFileSync(path.join(__dirname,'../extension/agent-hud.js'),'utf8');
 
-function createPage(registered=true) {
+function createPage(registered=true, {delayInitialStatus=false}={}) {
   const chatUrl='https://chatgpt.com/c/aaa';
   const callbacks={};
   const intervalCallbacks=[];
   const requests=[];
+  const hudMessages=[];
   const preferences={};
+  let isRegistered=registered;
+  let resolveInitialStatus=null;
+  let initialStatusSeen=false;
   let appended=null;
   const els=new Map();
   const newElement=(tag='div')=>({
@@ -73,6 +77,7 @@ function createPage(registered=true) {
   const window={addEventListener(name,fn){callbacks[name]=fn;}};
   const chrome={
     runtime:{
+      onMessage:{addListener(listener){hudMessages.push(listener);}},
       getURL(name){return 'chrome-extension://extension-id/'+name;},
       async sendMessage(msg) {
         requests.push(msg);
@@ -109,7 +114,11 @@ function createPage(registered=true) {
           };
         }
         assert.equal(msg.type,'network:hud-status');
-        return registered ? response : {ok:true,visible:false};
+        if (delayInitialStatus && !initialStatusSeen) {
+          initialStatusSeen=true;
+          return new Promise(resolve => {resolveInitialStatus=resolve;});
+        }
+        return isRegistered ? response : {ok:true,visible:false};
       }
     },
     storage:{local:{
@@ -126,6 +135,21 @@ function createPage(registered=true) {
   const flush=async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));};
   return {
     flush,els,preferences,requests,location,intervalCallbacks,
+    setRegistered(value){isRegistered=value;},
+    releaseInitialStatus(value={ok:true,visible:false}){
+      assert.ok(resolveInitialStatus,'No pending status request');
+      resolveInitialStatus(value);
+    },
+    async notify(message){
+      let response;
+      const answered = new Promise(resolve => {
+        const handled = hudMessages.map(listener =>
+          listener(message,null,payload => {response=payload;resolve();}));
+        if(!handled.some(Boolean))resolve();
+      });
+      await answered;
+      return response;
+    },
     get host(){return appended;},
     click(id){els.get(id).listeners.click();},
     clickPeer(index){els.get('chat-peers').children[index].listeners.click();},
@@ -134,9 +158,21 @@ function createPage(registered=true) {
   };
 }
 
-test('HUD appears automatically for its agent and renders message metadata only',async()=>{
+async function showHud(page) {
+  const result=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Chopper-Developer',
+    role:'Developer',chatUrl:'https://chatgpt.com/c/aaa'
+  });
+  assert.equal(result.ok,true);
+  await page.flush();
+}
+
+test('HUD stays absent until explicit Show and then renders its metadata',async()=>{
   const page=createPage();
   await page.flush();
+  assert.equal(page.host,null);
+  assert.equal(page.requests.length,0,'registered chat must not poll automatically');
+  await showHud(page);
   assert.ok(page.host);
   assert.equal(page.host.hidden,false);
   assert.equal(page.els.get('name').textContent,'Chopper-Developer');
@@ -155,6 +191,7 @@ test('HUD appears automatically for its agent and renders message metadata only'
 test('HUD can collapse, hide to unread badge and restore without extension popup',async()=>{
   const page=createPage();
   await page.flush();
+  await showHud(page);
   page.click('collapse');
   await page.flush();
   assert.equal(page.host.dataset.mode,'collapsed');
@@ -181,6 +218,7 @@ test('unregistered conversations never receive a floating widget',async()=>{
 test('HUD disappears on single-page chat navigation',async()=>{
   const page=createPage();
   await page.flush();
+  await showHud(page);
   page.location.href='https://chatgpt.com/c/another-conversation';
   page.location.pathname='/c/another-conversation';
   for(const callback of page.intervalCallbacks)callback();
@@ -189,7 +227,7 @@ test('HUD disappears on single-page chat navigation',async()=>{
 });
 
 test('HUD chat button opens private read-only modal with peer list and message bubbles',async()=>{
-  const page=createPage();await page.flush();
+  const page=createPage();await page.flush();await showHud(page);
   page.click('messages');await page.flush();
   assert.equal(page.els.get('chat-modal').hidden,false);
   assert.equal(page.els.get('chat-title').textContent,'Chopper-Developer');
@@ -209,7 +247,7 @@ test('HUD chat button opens private read-only modal with peer list and message b
 });
 
 test('HUD chat scroll loads older messages without jumping and can switch peer',async()=>{
-  const page=createPage();await page.flush();page.click('messages');await page.flush();
+  const page=createPage();await page.flush();await showHud(page);page.click('messages');await page.flush();
   page.scrollToTop();await page.flush();
   const bubbles=page.els.get('chat-bubbles').children;
   assert.equal(bubbles.length,4);
@@ -223,7 +261,7 @@ test('HUD chat scroll loads older messages without jumping and can switch peer',
 });
 
 test('HUD modal closes on Escape and is dismissed on chat navigation',async()=>{
-  const page=createPage();await page.flush();page.click('messages');await page.flush();
+  const page=createPage();await page.flush();await showHud(page);page.click('messages');await page.flush();
   await page.pressKey('Escape');
   assert.equal(page.els.get('chat-modal').hidden,true);
   assert.equal(page.els.get('chat-bubbles').children.length,0);
@@ -234,4 +272,69 @@ test('HUD modal closes on Escape and is dismissed on chat navigation',async()=>{
   await page.flush();
   assert.equal(page.els.get('chat-modal').hidden,true);
   assert.equal(page.host.hidden,true);
+});
+
+test('Explicit Show displays HUD without waiting for the 12-second polling timer',async()=>{
+  const page=createPage(false);
+  await page.flush();
+  assert.equal(page.host,null);
+  page.setRegistered(true);
+  const result=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Chopper-Developer',
+    role:'Developer',chatUrl:'https://chatgpt.com/c/aaa'
+  });
+  assert.equal(result.ok,true);
+  assert.ok(page.host);
+  assert.equal(page.host.hidden,false);
+  assert.equal(page.host.dataset.mode,'full');
+  assert.equal(page.els.get('name').textContent,'Chopper-Developer');
+  await page.flush();
+  assert.equal(page.els.get('pending').textContent,'3');
+});
+
+test('Explicit Show reopens a HUD previously hidden to its icon',async()=>{
+  const page=createPage();await page.flush();await showHud(page);
+  page.click('hide');await page.flush();
+  assert.equal(page.host.dataset.mode,'icon');
+  const response=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Chopper-Developer',
+    role:'Developer',chatUrl:'https://chatgpt.com/c/aaa'
+  });
+  await page.flush();
+  assert.equal(response.ok,true);
+  assert.equal(page.host.dataset.mode,'full');
+  assert.equal(page.host.hidden,false);
+});
+
+test('Start notification for a different conversation cannot show a HUD',async()=>{
+  const page=createPage(false);await page.flush();
+  const result=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Unrelated agent',
+    chatUrl:'https://chatgpt.com/c/another'
+  });
+  assert.equal(result.ok,false);
+  assert.equal(page.host,null);
+});
+
+test('Explicit Show cannot be hidden by a stale status poll',async()=>{
+  const page=createPage(true,{delayInitialStatus:true});
+  await page.flush();
+  assert.equal(page.host,null);
+  const first=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Chopper-Developer',
+    role:'Developer',chatUrl:'https://chatgpt.com/c/aaa'
+  });
+  assert.equal(first.ok,true);
+  assert.equal(page.host.hidden,false);
+  assert.equal(page.els.get('ui-state').textContent,'Подключаюсь…');
+  // A second manual Show supersedes the earlier in-flight request.
+  const second=await page.notify({
+    type:'network:hud-show',agentId:'a',name:'Chopper-Developer',
+    role:'Developer',chatUrl:'https://chatgpt.com/c/aaa'
+  });
+  assert.equal(second.ok,true);
+  page.releaseInitialStatus();
+  await page.flush();
+  assert.equal(page.host.hidden,false);
+  assert.equal(page.els.get('pending').textContent,'3');
 });

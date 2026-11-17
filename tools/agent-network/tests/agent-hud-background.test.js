@@ -9,11 +9,11 @@ const chatA = 'https://chatgpt.com/c/aaa';
 const chatB = 'https://chatgpt.com/c/bbb';
 function createWorker() {
   let onMessage, requests=0;
-  const data={agentsByTab:{
-    10:{name:'alpha',agentId:'agent-A',role:'coder',active:true,
-        token:'AGENT_SECRET',server:'http://127.0.0.1:8787',chatUrl:chatA},
-    20:{name:'beta',agentId:'agent-B',role:'reviewer',active:true,
-        token:'SECOND_SECRET',server:'http://127.0.0.1:8787',chatUrl:chatB}
+  const data={agentsByChat:{
+    [chatA]:{name:'alpha',agentId:'agent-A',role:'coder',active:true,
+        token:'AGENT_SECRET',server:'http://127.0.0.1:8787',chatUrl:chatA,ownerTabId:10},
+    [chatB]:{name:'beta',agentId:'agent-B',role:'reviewer',active:true,
+        token:'SECOND_SECRET',server:'http://127.0.0.1:8787',chatUrl:chatB,ownerTabId:20}
   }};
   const pages = {
     10:{id:10,url:chatA},
@@ -42,6 +42,7 @@ function createWorker() {
     tabs:{
       onRemoved:hook,onUpdated:hook,
       async get(id){return pages[id]},
+      async query(){return Object.values(pages)},
       async sendMessage(){return {state:'idle',network:'idle',activeRequests:0}},
       async create(){},
     },
@@ -51,7 +52,8 @@ function createWorker() {
         if(Array.isArray(keys)) return Object.fromEntries(keys.filter(key=>key in data).map(key=>[key,data[key]]));
         return {[keys]:data[keys]};
       },
-      async set(update){Object.assign(data,update);}
+      async set(update){Object.assign(data,update);},
+      async remove(key){delete data[key];}
     }}
   };
   const context=vm.createContext({

@@ -49,12 +49,14 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 </section>
 
 <section class="section">
-<div class="section-title">АГЕНТ · ЭТА ВКЛАДКА</div>
+<div class="section-title">АГЕНТ · ЭТОТ ЧАТ</div>
 <label for="name">Имя</label><input id="name" maxlength="64" placeholder="frontend-agent">
 <label for="role">Роль</label><input id="role" maxlength="120" placeholder="Frontend developer">
 <label for="purpose">Назначение</label><input id="purpose" maxlength="1000" placeholder="Работа над интерфейсом">
 <label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
 <div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button></div>
+<div class="agent-actions"><button class="ghost" id="show-hud" disabled>◈ Показать плавающее окно</button></div>
+<small class="hint">Агент привязан к ID беседы, а не вкладке: при открытии этого чата в другой вкладке имя и настройки сохраняются. Плавающее окно открывается только этой кнопкой.</small>
 </section>
 
 <div id="status" role="status">Проверяю состояние…</div>

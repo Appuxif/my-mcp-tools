@@ -114,6 +114,10 @@
 
   const seen = new Set();
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
+    // Ignore messages for other content scripts. In particular, the HUD owns
+    // "network:hud-show" and must be the only responder for it.
+    if (message?.type !== 'agent:probe' && message?.type !== 'agent:send')
+      return false;
     (async () => {
       if (message?.type === 'agent:probe')
         return { ok: true, ...state() };
