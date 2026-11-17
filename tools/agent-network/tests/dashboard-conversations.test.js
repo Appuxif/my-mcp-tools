@@ -102,7 +102,7 @@ function harness({unauthorized=false}={}) {
     assert.equal(options.credentials,'same-origin');
     assert.equal(options.headers['X-Admin-Token'],undefined);
     if(unauthorized)return {ok:false,status:401,async json(){return {detail:'Denied'}}};
-    const parsed=new URL('http://localhost'+url);
+    const parsed=new URL(url,'http://127.0.0.1:8787');
     const result=parsed.pathname.endsWith('/messages') ?
       (parsed.pathname.includes('/C/')?responses.c:
        parsed.searchParams.get('before')?responses.older:responses.latest)
@@ -110,7 +110,7 @@ function harness({unauthorized=false}={}) {
     return {ok:true,status:200,async json(){return structuredClone(result)}};
   };
   const context=vm.createContext({
-    console, document,fetch, URL,
+    console, document,fetch, URL,location:{origin:'http://127.0.0.1:8787'},
     Date, CustomEvent:class {constructor(type,opts){this.type=type;this.detail=opts?.detail;}},
     structuredClone
   });

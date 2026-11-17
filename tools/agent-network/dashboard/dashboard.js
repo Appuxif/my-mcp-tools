@@ -329,7 +329,7 @@
     if (inflight) return;
     inflight = true;
     try {
-      const response = await fetch('/api/v1/dashboard', {cache:'no-store', credentials:'same-origin'});
+      const response = await fetch(new URL('/api/v1/dashboard', location.origin).href, {cache:'no-store', credentials:'same-origin'});
       if (!response.ok) throw Error('HTTP ' + response.status);
       const data = await response.json();
       if (!data.server || !data.metrics || !Array.isArray(data.agents)) throw Error('Некорректный ответ сервера');

@@ -38,7 +38,7 @@
 
   async function request(url) {
     // Browser reuses the HTTP Basic credentials entered on /dashboard.
-    const response = await fetch(url, {
+    const response = await fetch(new URL(url, location.origin).href, {
       method:'GET',
       cache:'no-store',
       credentials:'same-origin',

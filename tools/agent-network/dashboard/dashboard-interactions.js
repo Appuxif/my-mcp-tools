@@ -36,7 +36,7 @@
       headers['X-Agent-Id'] = identity.agent_id;
       headers['X-Agent-Token'] = identity.token;
     }
-    const res = await fetch(url, {
+    const res = await fetch(new URL(url, location.origin).href, {
       method: options.method || 'GET',
       headers:{...headers, ...(options.headers || {})},
       cache:'no-store', credentials:'same-origin',
