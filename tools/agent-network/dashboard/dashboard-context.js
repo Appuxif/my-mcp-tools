@@ -1,16 +1,28 @@
 /* Administrator-only, read-only saved-context viewer.
  * A dedicated HTTP Basic-protected API, not the agent MCP read_context tool.
- * The content is untrusted text: render only with textContent.
+ * Saved content is untrusted: the Markdown renderer uses DOM text nodes,
+ * never innerHTML, and the raw view uses textContent.
  */
 (() => {
   const $ = id => document.getElementById(id);
   const state = {agentId:'',generation:0,previousFocus:null,raw:''};
   const visible = () => !$('context-overlay').hidden;
 
+  let displayEmpty = true;
+  function updateView() {
+    const markdown = !!$('context-markdown').checked && !displayEmpty;
+    $('context-rendered').hidden = !markdown;
+    $('context-content').hidden = markdown;
+    $('context-wrap').disabled = markdown;
+    if (markdown) AgentNetworkMarkdown.render($('context-rendered'), state.raw);
+  }
+
   function setText(text, empty = false) {
     const body = $('context-content');
     body.textContent = text;
     body.classList.toggle('empty', empty);
+    displayEmpty = empty;
+    updateView();
   }
 
   async function loadContext() {
@@ -98,6 +110,7 @@
   $('context-close').addEventListener('click', close);
   $('context-backdrop').addEventListener('click', close);
   $('context-refresh').addEventListener('click', () => void loadContext());
+  $('context-markdown').addEventListener('change', updateView);
   $('context-wrap').addEventListener('change', () => {
     $('context-content').classList.toggle('no-wrap', !$('context-wrap').checked);
   });

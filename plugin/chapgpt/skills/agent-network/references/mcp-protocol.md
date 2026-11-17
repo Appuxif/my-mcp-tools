@@ -127,7 +127,17 @@ Use **Карта взаимодействий → Команды** to filter onl
 one or more teams, retaining the selection on refresh. The inspector displays
 and edits team memberships through an admin-only API; its inputs preserve focus
 during live polling. Select an agent and click **Контекст** to inspect the
-latest durable compact snapshot in a separate read-only window.
+latest durable compact snapshot in a separate read-only window, with safe
+Markdown preview (default) and raw-text mode. All content is treated as
+untrusted data; links are restricted to HTTPS/HTTP and mailto, and raw HTML
+is not executed. Copy returns the original snapshot.
+
+The administrator's Dashboard operator can send to an agent in a disjoint
+team: the Basic-authenticated Dashboard HTTP send endpoint first **adds the
+Dashboard operator** to one team of the recipient, then uses the ordinary
+team-restricted message queue. This is a persistent membership change
+visible in the inspector and is **not available through native MCP**. Agents
+cannot simply claim to be the Dashboard operator to cross team boundaries.
 
 Arrow age labels are shown only for interactions within the past 10 minutes. An arrow without an age label does **not** mean the connection is inactive or absent. Never expose another agent's secrets or unrelated private message contents in reports or external tools.
 

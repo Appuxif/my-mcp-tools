@@ -131,8 +131,15 @@ Ordinary agents cannot access them with only their MCP tokens.
 Team isolation is for organizing **trusted agents**, not multi-tenant hostile
 users: anyone permitted to create an agent joins `default`. To isolate new
 agents, promptly move them to an appropriate team via an administrator.
-The Dashboard's own optional sending identity is also an agent and must
-share a team with any recipients before it can send to them.
+The Dashboard's own optional sending identity is also an agent. When
+the **authenticated administrator sends a message through Dashboard**, the
+server automatically adds the Dashboard operator agent to **one team shared
+by the recipient**, if needed, before queueing the message. This makes
+Dashboard sends work across teams **without bypassing** ordinary team
+checks for inbox, acknowledgment, history or PUSH. The membership is
+persistent and can be removed by the administrator in the inspector.
+**Normal MCP agents cannot do this**, even if they know the recipient UUID.
+The recipient's own teams are never changed by sending.
 
 ## Dashboard
 
@@ -161,6 +168,10 @@ table, the inspector, and message history remain global administrator views.
 A separate read-only window shows the full persisted compact summary
 verbatim, its last update timestamp and UTF-8 byte size. You can copy the
 text, toggle line wrapping, refresh the saved snapshot, or close with Escape.
+The viewer now defaults to a **safe Markdown preview**, rendering headings,
+lists, checkboxes, tables, links and code blocks without executing untrusted
+HTML. Uncheck **Markdown** to inspect the exact raw snapshot; **Copy** always
+copies the original text. No CDN or additional server-side package is required.
 If no `save_context` call has occurred, the window explains that there is
 no saved context yet. The reader does not edit data or update agent activity.
 The endpoint `GET /api/v1/dashboard/agents/{agent_id}/context` is available

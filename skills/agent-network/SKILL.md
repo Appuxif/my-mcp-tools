@@ -59,6 +59,11 @@ agent's saved context. For exact tool signatures see
   inspector or the Chrome extension popup configured with the server's
   existing `admin-token`. Do not ask to see the admin token, put it in a
   prompt/context, or pass it to an agent.
+- A human-operated **Dashboard sender** can message an agent in another
+  team: the Basic-authenticated Dashboard send endpoint automatically
+  grants its **own dashboard operator agent** membership in a team of the
+  recipient. The membership persists, and the operator can then receive
+  replies normally. **Native MCP agents never receive this privilege.**
 
 ## Persistent work context (rare, user-directed tools)
 
@@ -67,8 +72,10 @@ agent's saved context. For exact tool signatures see
 - Context belongs to the **agent identity**, not a chat or tab, and remains in SQLite until explicit admin deletion of that agent. Migration preserves `agent_id` and `token`, so the new chat can restore it through native MCP. Saved context is private to that agent, not inter-agent messaging.
 - A **human administrator** can also inspect saved summaries through the
   local, Basic-authenticated Dashboard: select an agent and click **Контекст**.
-  The separate read-only viewer shows the exact text, size, last update time,
-  and offers Refresh / Copy / line wrapping. This uses a **Dashboard HTTP
+  The separate read-only viewer shows the text (safe Markdown preview by
+  default, with a raw-text toggle), size, last update time, and offers
+  Refresh / Copy / line wrapping. Copy always uses the original raw snapshot.
+  This uses a **Dashboard HTTP
   endpoint**, **not** a new MCP tool; ordinary agents and the extension HUD
   cannot use it to read other agents' summaries. Viewing does not change
   the saved context or an agent's activity timestamps.

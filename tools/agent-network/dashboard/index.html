@@ -235,12 +235,14 @@
       <div class="context-toolbar">
         <span id="context-status" role="status">Загрузка…</span>
         <div class="context-tools">
+          <label class="context-wrap-label"><input id="context-markdown" type="checkbox" checked> Markdown</label>
           <label class="context-wrap-label"><input id="context-wrap" type="checkbox" checked> Перенос строк</label>
           <button id="context-refresh" class="chat-refresh" type="button">Обновить ↻</button>
           <button id="context-copy" class="chat-refresh" type="button" disabled>Копировать</button>
         </div>
       </div>
       <div id="context-scroll" class="context-scroll" tabindex="0">
+        <div id="context-rendered" class="context-rendered" hidden></div>
         <pre id="context-content" class="context-content"></pre>
       </div>
       <footer class="context-footer">Контекст сохраняется агентом через MCP save_context · просмотр не меняет данные</footer>
@@ -251,6 +253,7 @@
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
+  <script src="/dashboard-assets/dashboard-markdown.js" defer></script>
   <script src="/dashboard-assets/dashboard-context.js" defer></script>
 </body>
 </html>

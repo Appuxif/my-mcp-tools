@@ -253,6 +253,26 @@ class Store:
             # Do not reveal whether an invisible agent actually exists.
             raise ValueError("Recipient agent not found")
 
+    def _ensure_dashboard_team(self, sender_id: str, recipient_id: str) -> None:
+        """Admin Dashboard send: grant its operator a recipient's team.
+
+        Called only from the Basic-authenticated Dashboard HTTP send route.
+        Normal MCP sends must never call this. Adding the operator (not the
+        recipient) preserves the same team-gated inbox/ACK/PUSH semantics.
+        """
+        if self._shared(sender_id, recipient_id):
+            return
+        team = self.db.execute(
+            "SELECT team_id FROM agent_teams WHERE agent_id=? ORDER BY team_id LIMIT 1",
+            (recipient_id,),
+        ).fetchone()
+        if team is None:
+            raise ValueError("Recipient agent has no assigned team")
+        self.db.execute(
+            "INSERT OR IGNORE INTO agent_teams(agent_id,team_id) VALUES(?,?)",
+            (sender_id, team["team_id"]),
+        )
+
     def maintain_storage(self) -> dict:
         """Return unused SQLite pages to the OS without compacting every sweep."""
         with self.lock:
@@ -818,12 +838,16 @@ class Store:
                 if existing:
                     # Repeated request must agree with the first request.
                     recipient = self.resolve(to)
-                    self._check_shared(sender_id, recipient["agent_id"])
                     if (existing["recipient_id"] != recipient["agent_id"] or
                         existing["body"] != body or existing["task_id"] != task_id):
                         raise ValueError("Idempotency key reused with different message")
+                    if source == "dashboard":
+                        self._ensure_dashboard_team(sender_id, recipient["agent_id"])
+                    self._check_shared(sender_id, recipient["agent_id"])
                     return {"message_id": existing["message_id"], "duplicate": True}
             recipient = self.resolve(to)
+            if source == "dashboard":
+                self._ensure_dashboard_team(sender_id, recipient["agent_id"])
             self._check_shared(sender_id, recipient["agent_id"])
             message_id = opaque_id()
             self.db.execute(
