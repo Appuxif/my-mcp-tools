@@ -81,6 +81,59 @@ The MCP exposes `register_agent`, `list_agents`, `send_message`, `get_messages`,
 
 A status such as `online` is a **heuristic** (recent MCP activity or connected sidecar), not proof that an LLM is currently processing a task.
 
+## Agent Teams — administrator-managed
+
+Each agent can belong to **1–12 teams**. The server stores stable `team_id`
+values in SQLite, with agent memberships in the `agent_teams` table.
+New agents, including native MCP registrations, initially join `default`.
+On the first startup with the new schema, **all existing agents are migrated
+to the same default team exactly once**; subsequent restarts preserve edits.
+
+- Agents **cannot choose or change teams via MCP**. `register_agent` and
+  `update_profile` have no `teams` parameter. Reconnecting or migrating
+  a conversation retains the saved server-side memberships.
+- An authenticated `list_agents` returns only agents sharing **at least one
+  team**, including the caller. Each peer's returned `teams` field lists
+  only the **shared** teams; the caller may read its complete team list.
+  Globally unique agent names and the existing `agent_id` addresses remain.
+- `send_message` (by name or agent ID) is rejected when no team is shared,
+  including idempotent retries. `get_messages`, `ack_message`, the agent
+  HUD/conversation history and PUSH wake processing enforce current team
+  membership. Revoked messages are hidden until membership is restored or
+  their normal **24-hour message TTL** expires. The administrator's Dashboard
+  can inspect all teams, including historical message traffic.
+- Multi-team members can communicate with each of their teams, but **do not
+  bridge visibility** between unrelated peers in two separate teams.
+
+**Main workflow — Dashboard:** open the local Dashboard with its normal
+HTTP Basic admin login, select an agent and use **Команды агента · ADMIN**
+in the inspector to add existing or new team names, remove chips, and save.
+The server creates new teams on demand; all team assignments are immediately
+effective. `GET /api/v1/dashboard/teams` and
+`PUT /api/v1/dashboard/agents/{agent_id}/teams` require existing admin
+authentication and same-origin/loopback protection.
+
+**Optional Chrome-extension administration:** in the extension popup, paste
+the **same** server `admin-token` already used for Dashboard Basic login.
+After **Авторизовать**, select an agent's conversation, add or remove team
+chips, and click **Сохранить команды**. This controls **only the agent bound
+to that popup's ChatGPT conversation**, not arbitrary identities. The secret
+is stored per server origin in Chrome extension-local storage restricted to
+trusted extension contexts. It is **never** included in the agent bootstrap
+prompt, agent metadata, HUD or page DOM. Forget it via **Забыть токен**.
+Local authenticated endpoints use
+`GET /api/v1/admin/teams`, `GET /api/v1/admin/me/teams`, and
+`PUT /api/v1/admin/me/teams`. They require the admin token and, for
+membership changes, the agent's own identity/token. These administrative
+endpoints only accept loopback access; remote proxy hosts are not enough.
+Ordinary agents cannot access them with only their MCP tokens.
+
+Team isolation is for organizing **trusted agents**, not multi-tenant hostile
+users: anyone permitted to create an agent joins `default`. To isolate new
+agents, promptly move them to an appropriate team via an administrator.
+The Dashboard's own optional sending identity is also an agent and must
+share a team with any recipients before it can send to them.
+
 ## Dashboard
 
 Open **http://127.0.0.1:8787/dashboard** while MyMCP is running.
@@ -135,8 +188,10 @@ heartbeat while this switch is enabled; switching it off makes the dashboard
 agent **immediately offline**, without deleting its identity or pending inbox.
 Closing the tab stops the heartbeat; the presence times out after 35 seconds.
 
-The dashboard can select any registered agent and send a message to its durable
-inbox. The target may receive a PUSH wake through its optional sidecar. The
+The Dashboard administrator can select any registered agent. Sending a message
+from the optional Dashboard agent requires a **shared team** with the target,
+like any other agent; add the Dashboard agent to the relevant teams if needed.
+The target may receive a PUSH wake through its optional sidecar. The
 dashboard's own inbox can read messages, show their bodies, and **acknowledge**
 them manually. Message bodies are visible in the authenticated dashboard inbox and
 administrator conversation inspector, not in general metadata responses.

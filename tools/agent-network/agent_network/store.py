@@ -49,6 +49,7 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.lock, self.db:
+            # Backfill legacy agents once, recorded transactionally after DDL.
             self.db.executescript("""
                 PRAGMA journal_mode=WAL;
                 PRAGMA busy_timeout=5000;
@@ -106,6 +107,19 @@ class Store:
                     last_wake_result TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS channels_agent ON channels(agent_id, connected);
+                CREATE TABLE IF NOT EXISTS teams (
+                    team_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE
+                );
+                CREATE TABLE IF NOT EXISTS agent_teams (
+                    agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    team_id TEXT NOT NULL REFERENCES teams(team_id),
+                    PRIMARY KEY (agent_id, team_id)
+                );
+                CREATE INDEX IF NOT EXISTS team_members ON agent_teams(team_id, agent_id);
+                CREATE TABLE IF NOT EXISTS migrations(
+                    name TEXT PRIMARY KEY
+                );
                 CREATE TABLE IF NOT EXISTS agent_contexts(
                     agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id) ON DELETE CASCADE,
                     context TEXT NOT NULL,
@@ -113,6 +127,23 @@ class Store:
                 );
             """)
             self.db.execute("PRAGMA foreign_keys=ON")
+            self.db.execute(
+                "INSERT OR IGNORE INTO teams(team_id, name) VALUES ('default', 'default')"
+            )
+            if self.db.execute(
+                "SELECT 1 FROM migrations WHERE name='agent_teams_v1'"
+            ).fetchone() is None:
+                # Never add default to an already-assigned agent. Orphaned
+                # agents can arise if an earlier schema upgrade was interrupted.
+                self.db.execute(
+                    "INSERT INTO agent_teams(agent_id,team_id) "
+                    "SELECT a.agent_id,'default' FROM agents a "
+                    "WHERE NOT EXISTS (SELECT 1 FROM agent_teams at "
+                    "WHERE at.agent_id=a.agent_id)"
+                )
+                self.db.execute(
+                    "INSERT INTO migrations(name) VALUES('agent_teams_v1')"
+                )
             # Compatible migration for existing agent-network.db files.
             columns = {r["name"] for r in self.db.execute("PRAGMA table_info(agents)")}
             if "dashboard_enabled" not in columns:
@@ -136,6 +167,91 @@ class Store:
                 if self.db.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
                     self.db.execute("PRAGMA auto_vacuum=INCREMENTAL")
                     self.db.execute("VACUUM")
+
+    @staticmethod
+    def _team_names(teams: list[str] | None) -> list[str]:
+        if teams is None:
+            return ["default"]
+        if not isinstance(teams, list) or not 1 <= len(teams) <= 12:
+            raise ValueError("Specify 1..12 team names")
+        result = []
+        for team in teams:
+            if (not isinstance(team, str) or not 1 <= len(team.strip()) <= 64
+                    or any(ord(c) < 32 or ord(c) == 127 for c in team)):
+                raise ValueError("Team name must be 1..64 printable characters")
+            name = team.strip()
+            if name.casefold() not in [x.casefold() for x in result]:
+                result.append(name)
+        return result
+
+    def _set_teams(self, agent_id: str, names: list[str]) -> None:
+        """Use inside a locked transaction. Team names are case-insensitive."""
+        team_ids = []
+        for name in names:
+            # SQLite NOCASE handles ASCII only; use Unicode casefold so
+            # Russian/Serbian team names also reuse their existing team ID.
+            row = next(
+                (r for r in self.db.execute("SELECT team_id,name FROM teams")
+                 if r["name"].casefold() == name.casefold()), None
+            )
+            if row is None:
+                tid = opaque_id()
+                self.db.execute("INSERT INTO teams(team_id,name) VALUES(?,?)", (tid,name))
+            else:
+                tid = row["team_id"]
+            team_ids.append(tid)
+        self.db.execute("DELETE FROM agent_teams WHERE agent_id=?", (agent_id,))
+        self.db.executemany(
+            "INSERT INTO agent_teams(agent_id,team_id) VALUES (?,?)",
+            [(agent_id, tid) for tid in team_ids],
+        )
+
+    def assign_teams(self, agent_id: str, teams: list[str]) -> dict:
+        """Administrator-only entry point. Never expose via agent credentials."""
+        names = self._team_names(teams)
+        with self.lock, self.db:
+            self._agent(agent_id)
+            self._set_teams(agent_id, names)
+            self.db.execute(
+                "UPDATE agents SET updated_at=? WHERE agent_id=?", (now(), agent_id)
+            )
+            return self._public(self._agent(agent_id))
+
+    def team_list(self) -> list[dict]:
+        """Team names/IDs for authenticated administrative selectors."""
+        with self.lock:
+            return [dict(r) for r in self.db.execute(
+                "SELECT team_id,name FROM teams ORDER BY name COLLATE NOCASE"
+            )]
+
+    def _teams(self, agent_id: str) -> list[dict]:
+        return [dict(r) for r in self.db.execute(
+            "SELECT t.team_id,t.name FROM teams t "
+            "JOIN agent_teams a ON a.team_id=t.team_id "
+            "WHERE a.agent_id=? ORDER BY t.name COLLATE NOCASE", (agent_id,)
+        )]
+
+    def _public(self, row: sqlite3.Row, *, present: bool = False,
+                viewer_id: str | None = None) -> dict:
+        data = public_agent(row, present=present)
+        teams = self._teams(row["agent_id"])
+        if viewer_id is not None and viewer_id != row["agent_id"]:
+            visible = {t["team_id"] for t in self._teams(viewer_id)}
+            teams = [t for t in teams if t["team_id"] in visible]
+        data["teams"] = teams
+        return data
+
+    def _shared(self, first: str, second: str) -> bool:
+        return self.db.execute(
+            "SELECT 1 FROM agent_teams a JOIN agent_teams b "
+            "ON b.team_id=a.team_id WHERE a.agent_id=? AND b.agent_id=? LIMIT 1",
+            (first,second)
+        ).fetchone() is not None
+
+    def _check_shared(self, sender: str, recipient: str) -> None:
+        if not self._shared(sender,recipient):
+            # Do not reveal whether an invisible agent actually exists.
+            raise ValueError("Recipient agent not found")
 
     def maintain_storage(self) -> dict:
         """Return unused SQLite pages to the OS without compacting every sweep."""
@@ -178,6 +294,7 @@ class Store:
             contexts = self.db.execute(
                 "DELETE FROM agent_contexts WHERE agent_id=?", (agent_id,)
             ).rowcount
+            self.db.execute("DELETE FROM agent_teams WHERE agent_id=?", (agent_id,))
             # Keep aggregate tool telemetry but unlink it from deleted identities.
             self.db.execute("UPDATE tool_calls SET agent_id=NULL WHERE agent_id=?",
                             (agent_id,))
@@ -200,7 +317,7 @@ class Store:
         """Public LOCAL dashboard metadata. Never return credentials or bodies."""
         cutoff = now() - window_seconds
         with self.lock:
-            agents = [public_agent(r, present=r["agent_id"] in (present_ids or set()))
+            agents = [self._public(r, present=r["agent_id"] in (present_ids or set()))
                       for r in self.db.execute("SELECT * FROM agents ORDER BY name")]
             pending = {
                 row["recipient_id"]: row["total"]
@@ -238,7 +355,8 @@ class Store:
                 (cutoff,)
             ).fetchone()
             return {
-                "agents": agents, "channels": channels,
+                "agents": agents, "teams": self.team_list(),
+                "channels": channels,
                 "edges": edges, "recent": recent,
                 "metrics": {
                     "agents_total": len(agents),
@@ -261,20 +379,26 @@ class Store:
         cutoff = now() - MESSAGE_TTL_SECONDS
         with self.lock:
             own = self.verify(agent_id, token)
-            result = public_agent(own, present=agent_id in (present_ids or set()))
+            result = self._public(own, present=agent_id in (present_ids or set()))
             result["pending_messages"] = self.db.execute(
                 "SELECT count(*) FROM messages WHERE recipient_id=? "
-                "AND status='pending' AND created_at>?",
+                "AND status='pending' AND created_at>? "
+                "AND EXISTS (SELECT 1 FROM agent_teams src "
+                "JOIN agent_teams dst ON src.team_id=dst.team_id "
+                "WHERE src.agent_id=messages.sender_id AND dst.agent_id=messages.recipient_id)",
                 (agent_id, cutoff),
             ).fetchone()[0]
             edge_rows = self.db.execute(
-                "SELECT sender_id AS source,recipient_id AS target,"
+                "SELECT m.sender_id AS source,m.recipient_id AS target,"
                 "count(*) AS recent_count,"
-                "sum(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,"
-                "max(created_at) AS last_message_at "
-                "FROM messages WHERE created_at>? AND "
-                "(sender_id=? OR recipient_id=?) "
-                "GROUP BY sender_id,recipient_id "
+                "sum(CASE WHEN m.status='pending' THEN 1 ELSE 0 END) AS pending_count,"
+                "max(m.created_at) AS last_message_at "
+                "FROM messages m WHERE m.created_at>? AND "
+                "(m.sender_id=? OR m.recipient_id=?) "
+                "AND EXISTS (SELECT 1 FROM agent_teams src "
+                "JOIN agent_teams dst ON src.team_id=dst.team_id "
+                "WHERE src.agent_id=m.sender_id AND dst.agent_id=m.recipient_id) "
+                "GROUP BY m.sender_id,m.recipient_id "
                 "ORDER BY last_message_at DESC LIMIT 101",
                 (cutoff, agent_id, agent_id),
             ).fetchall()
@@ -290,7 +414,7 @@ class Store:
                     "SELECT agent_id,name FROM agents WHERE agent_id IN ("
                     + ",".join("?" for _ in peers) + ")",
                     tuple(peers),
-                ) if r["agent_id"] != agent_id
+                ) if r["agent_id"] != agent_id and self._shared(agent_id, r["agent_id"])
             ]
             recent = [
                 dict(r) for r in self.db.execute(
@@ -301,6 +425,9 @@ class Store:
                     "JOIN agents r ON r.agent_id=m.recipient_id "
                     "WHERE m.created_at>? AND "
                     "(m.sender_id=? OR m.recipient_id=?) "
+                    "AND EXISTS (SELECT 1 FROM agent_teams src "
+                    "JOIN agent_teams dst ON src.team_id=dst.team_id "
+                    "WHERE src.agent_id=m.sender_id AND dst.agent_id=m.recipient_id) "
                     "ORDER BY m.created_at DESC,m.rowid DESC LIMIT 10",
                     (cutoff, agent_id, agent_id),
                 )
@@ -484,7 +611,10 @@ class Store:
         """Peer list limited to the caller's own conversations, authenticated."""
         with self.lock:
             self.verify(agent_id, token)
-            return self.conversations(agent_id)
+            data = self.conversations(agent_id)
+            data["items"] = [p for p in data["items"]
+                             if self._shared(agent_id, p["peer_id"])]
+            return data
 
     def agent_conversation_messages(
         self, agent_id: str, token: str, peer_id: str,
@@ -497,6 +627,8 @@ class Store:
         """
         with self.lock:
             self.verify(agent_id, token)
+            if not self._shared(agent_id,peer_id):
+                raise ValueError("Conversation not found")
             if not self.db.execute(
                 "SELECT 1 FROM messages WHERE created_at > ? AND "
                 "((sender_id=? AND recipient_id=?) OR "
@@ -525,7 +657,7 @@ class Store:
                 " task_status='idle',updated_at=? WHERE agent_id=?",
                 (now(), now(), aid)
             )
-            result["agent"] = public_agent(self._agent(aid))
+            result["agent"] = self._public(self._agent(aid))
         return result
 
     def dashboard_auth(self, agent_id: str, token: str, *, touch: bool = True) -> dict:
@@ -540,7 +672,7 @@ class Store:
                     "UPDATE agents SET last_dashboard_seen=? WHERE agent_id=?",
                     (now(), agent_id)
                 )
-            return public_agent(self._agent(agent_id))
+            return self._public(self._agent(agent_id))
 
     def disable_dashboard(self, agent_id: str, token: str) -> dict:
         self.dashboard_auth(agent_id, token, touch=False)
@@ -550,7 +682,7 @@ class Store:
                 " updated_at=? WHERE agent_id=?",
                 (now(), agent_id)
             )
-            return public_agent(self._agent(agent_id))
+            return self._public(self._agent(agent_id))
 
     def _activity(self, agent_id: str, token: str, polled: bool,
                   source: str) -> None:
@@ -597,7 +729,7 @@ class Store:
                     "UPDATE agents SET last_mcp_activity=? WHERE agent_id=?",
                     (now(), agent_id),
                 )
-                return {"agent": public_agent(self._agent(agent_id)), "token": token, "created": False}
+                return {"agent": self._public(self._agent(agent_id)), "token": token, "created": False}
             if agent_id:
                 raise ValueError("Unknown agent identity; omit id to create a new agent")
             agent_id = opaque_id()
@@ -608,7 +740,8 @@ class Store:
                 "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (agent_id, name, kind, role, purpose, description, digest(secret), stamp, stamp, stamp)
             )
-            return {"agent": public_agent(self._agent(agent_id)), "token": secret, "created": True}
+            self._set_teams(agent_id, ["default"])
+            return {"agent": self._public(self._agent(agent_id)), "token": secret, "created": True}
 
     def update_profile(self, agent_id: str, token: str, *, role: str = "",
                        purpose: str = "", description: str = "") -> dict:
@@ -619,7 +752,7 @@ class Store:
             self.db.execute(
                 "UPDATE agents SET role=?, purpose=?, description=?, updated_at=? WHERE agent_id=?",
                 (role.strip(), purpose, description, now(), agent_id))
-            return public_agent(self._agent(agent_id))
+            return self._public(self._agent(agent_id))
 
     def touch_mcp(self, agent_id: str, token: str, *, polled: bool = False) -> None:
         self.verify(agent_id, token)
@@ -633,16 +766,34 @@ class Store:
                 self.db.execute("UPDATE agents SET last_mcp_activity=? WHERE agent_id=?",
                                 (stamp, agent_id))
 
-    def agents(self, *, present_ids: set[str] | None = None) -> list[dict]:
+    def agents(self, *, present_ids: set[str] | None = None,
+               requester_id: str | None = None) -> list[dict]:
         with self.lock:
-            rows = self.db.execute("SELECT * FROM agents ORDER BY name").fetchall()
-            return [public_agent(r, present=r["agent_id"] in (present_ids or set()))
+            if requester_id is not None:
+                rows = self.db.execute(
+                    "SELECT DISTINCT a.* FROM agents a "
+                    "JOIN agent_teams member ON member.agent_id=a.agent_id "
+                    "JOIN agent_teams mine ON mine.team_id=member.team_id "
+                    "WHERE mine.agent_id=? ORDER BY a.name", (requester_id,)
+                ).fetchall()
+            else:
+                rows = self.db.execute("SELECT * FROM agents ORDER BY name").fetchall()
+            return [self._public(r, present=r["agent_id"] in (present_ids or set()),
+                                 viewer_id=requester_id)
                     for r in rows]
 
     def resolve(self, name_or_id: str) -> sqlite3.Row:
         with self.lock:
-            row = self.db.execute("SELECT * FROM agents WHERE agent_id=? OR name=?",
-                                  (name_or_id, name_or_id)).fetchone()
+            # UUID addressing takes precedence over agent names. A malicious
+            # or accidental name equal to another agent's ID cannot redirect
+            # messages intended for that identity.
+            row = self.db.execute(
+                "SELECT * FROM agents WHERE agent_id=?", (name_or_id,)
+            ).fetchone()
+            if row is None:
+                row = self.db.execute(
+                    "SELECT * FROM agents WHERE name=?", (name_or_id,)
+                ).fetchone()
             if row is None:
                 raise ValueError("Recipient agent not found")
             return row
@@ -667,11 +818,13 @@ class Store:
                 if existing:
                     # Repeated request must agree with the first request.
                     recipient = self.resolve(to)
+                    self._check_shared(sender_id, recipient["agent_id"])
                     if (existing["recipient_id"] != recipient["agent_id"] or
                         existing["body"] != body or existing["task_id"] != task_id):
                         raise ValueError("Idempotency key reused with different message")
                     return {"message_id": existing["message_id"], "duplicate": True}
             recipient = self.resolve(to)
+            self._check_shared(sender_id, recipient["agent_id"])
             message_id = opaque_id()
             self.db.execute(
                 "INSERT INTO messages(message_id,sender_id,recipient_id,body,task_id,client_message_id,created_at) "
@@ -690,6 +843,9 @@ class Store:
                 "SELECT m.*, a.name AS sender_name FROM messages m "
                 "JOIN agents a ON a.agent_id=m.sender_id "
                 "WHERE m.recipient_id=? AND m.status='pending' AND m.created_at > ? "
+                "AND EXISTS (SELECT 1 FROM agent_teams src "
+                "JOIN agent_teams dst ON src.team_id=dst.team_id "
+                "WHERE src.agent_id=m.sender_id AND dst.agent_id=m.recipient_id) "
                 "ORDER BY m.created_at,m.message_id LIMIT ?",
                 (agent_id, now() - MESSAGE_TTL_SECONDS, limit)).fetchall()
             return [dict(x) for x in rows]
@@ -703,7 +859,8 @@ class Store:
                 (now() - MESSAGE_TTL_SECONDS,)
             )
             msg = self.db.execute("SELECT * FROM messages WHERE message_id=?", (message_id,)).fetchone()
-            if msg is None or msg["recipient_id"] != agent_id:
+            if msg is None or msg["recipient_id"] != agent_id or not self._shared(
+                    msg["sender_id"], msg["recipient_id"]):
                 raise ValueError("Message not found in your inbox")
             if msg["status"] == "pending":
                 self.db.execute(
@@ -750,7 +907,7 @@ class Store:
             self.db.execute(
                 "UPDATE agents SET current_task=?,task_status=?,updated_at=? WHERE agent_id=?",
                 (task, status, now(), agent_id))
-            return public_agent(self._agent(agent_id))
+            return self._public(self._agent(agent_id))
 
     def connect_channel(self, agent_id: str, token: str, kind: str, channel_id: str,
                         state: str) -> None:
@@ -802,6 +959,9 @@ class Store:
                 " COUNT(m.message_id) AS pending_count FROM agents a "
                 "JOIN messages m ON m.recipient_id=a.agent_id AND m.status='pending' "
                 "AND m.created_at>? "
+                "AND EXISTS (SELECT 1 FROM agent_teams src "
+                "JOIN agent_teams dst ON src.team_id=dst.team_id "
+                "WHERE src.agent_id=m.sender_id AND dst.agent_id=m.recipient_id) "
                 "GROUP BY a.agent_id HAVING pending_count > 0",
                 (stamp - MESSAGE_TTL_SECONDS,)).fetchall()
             return [

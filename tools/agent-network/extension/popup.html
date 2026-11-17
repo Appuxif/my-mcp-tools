@@ -37,6 +37,14 @@ button.ghost{background:#162438;border-color:#2c425d;color:#b9cee6}
 .agent-actions button{flex:1}
 #status{font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;background:#112236;border:1px solid #263b54;border-radius:8px;padding:11px 12px;min-height:50px;color:#b3d1eb}
 small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height:1.5}
+.team-actions{display:flex;gap:7px;margin-top:9px}
+.team-actions input{min-width:0;flex:1}
+.team-actions button{white-space:nowrap}
+.team-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.team-chip{background:#193a48;color:#bfebe4;border:1px solid #38766b;padding:5px 8px;font-size:11px}
+.team-chip:disabled{opacity:1;cursor:default}
+.admin-line{color:#a3b8cb;font-size:11px;margin-top:8px;white-space:pre-wrap}
+
 </style>
 </head>
 <body>
@@ -73,6 +81,31 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 </div>
 <div class="agent-actions"><button class="ghost" id="show-hud" disabled>◈ Показать плавающее окно</button></div>
 <small class="hint">Агент привязан к ID беседы, а не вкладке: при открытии этого чата в другой вкладке имя и настройки сохраняются. Плавающее окно открывается только этой кнопкой.</small>
+</section>
+
+<section class="section" id="admin-section">
+  <div class="section-title">КОМАНДЫ · УПРАВЛЕНИЕ АДМИНИСТРАТОРОМ</div>
+  <small class="hint">Назначение команд доступно только с admin-token сервера. Агент сам не может изменить членство. Токен хранится только в расширении, отдельно для каждого сервера.</small>
+  <label for="admin-token">Admin token (один раз для сервера)</label>
+  <input id="admin-token" type="password" autocomplete="off" spellcheck="false"
+         placeholder="Вставь токен из файла admin-token">
+  <div class="team-actions">
+    <button class="secondary" id="admin-connect">Авторизовать</button>
+    <button class="ghost" id="admin-clear">Забыть токен</button>
+  </div>
+  <div class="admin-line" id="admin-info" role="status">Администратор не подключён</div>
+  <label for="team-name">Добавить команду</label>
+  <div class="team-actions">
+    <input id="team-name" maxlength="64" list="known-teams" autocomplete="off"
+           placeholder="Название существующей или новой команды" disabled>
+    <datalist id="known-teams"></datalist>
+    <button class="secondary" id="team-add" disabled>Добавить</button>
+  </div>
+  <div id="team-members" class="team-chips"></div>
+  <div class="team-actions">
+    <button class="primary" id="team-save" disabled>Сохранить команды</button>
+  </div>
+  <small class="hint">Можно выбрать несколько команд. Для удаления нажми × рядом с названием и сохрани. Агент должен состоять минимум в одной команде.</small>
 </section>
 
 <div id="status" role="status">Проверяю состояние…</div>

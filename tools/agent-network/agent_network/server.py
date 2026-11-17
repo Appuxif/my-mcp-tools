@@ -72,6 +72,10 @@ class DashboardAck(BaseModel):
     message_id: str
 
 
+class TeamAssignment(BaseModel):
+    teams: list[str]
+
+
 def load_admin_token(database: str, configured_file: str = "") -> tuple[str, str]:
     """Persistent independent admin capability; never return it over HTTP."""
     path = Path(configured_file) if configured_file else (
@@ -257,6 +261,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     mcp = MCPServer(
         "agent-network",
         instructions=(
+            "Agents communicate only with peers sharing at least one team. "
+            "Team membership is read-only for agents. Newly registered agents "
+            "join default; only the human administrator can assign teams via "
+            "Dashboard or a configured extension. list_agents is scoped to shared teams. "
             "Messages are delivered over native MCP. Register a stable agent identity "
             "once, retain its per-agent token, and use that identity in further calls. "
             "Use get_messages to read pending messages and ack_message only after "
@@ -301,7 +309,8 @@ def create_app(config: Config | None = None) -> FastAPI:
     def register_agent(name: str, role: str, kind: str = "other", purpose: str = "",
                        description: str = "", agent_id: str = "", token: str = "") -> dict:
         """Register an agent. Returns a new per-agent token once; for reconnection
-        supply the original agent_id and token. Keep token private."""
+        supply the original agent_id and token. Initial team: default.
+        Agents cannot assign themselves to teams. Keep token private."""
         return store.register(name, role, kind, purpose, description, agent_id, token)
 
     @mcp.tool()
@@ -309,7 +318,10 @@ def create_app(config: Config | None = None) -> FastAPI:
     def list_agents(agent_id: str, token: str) -> list[dict]:
         """List registered agents, descriptions, task state and presence."""
         store.touch_mcp(agent_id, token)
-        return store.agents(present_ids={x[0] for x in broker.connections.values()})
+        return store.agents(
+            present_ids={x[0] for x in broker.connections.values()},
+            requester_id=agent_id,
+        )
 
     @mcp.tool()
     @audit
@@ -553,6 +565,67 @@ def create_app(config: Config | None = None) -> FastAPI:
                 headers={"WWW-Authenticate":'Basic realm="Agent Network Dashboard"'},
             )
 
+    @app.get("/api/v1/dashboard/teams")
+    def dashboard_teams(req: Request) -> JSONResponse:
+        require_dashboard_admin(req)
+        return JSONResponse({"items": store.team_list()},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/v1/dashboard/agents/{target_agent_id}/teams")
+    def dashboard_assign_teams(target_agent_id: str, body: TeamAssignment,
+                               req: Request) -> dict:
+        require_dashboard_admin(req)
+        try:
+            return store.assign_teams(target_agent_id, body.teams)
+        except ValueError as exc:
+            status = 404 if str(exc) == "Unknown agent_id" else 400
+            raise HTTPException(status, str(exc)) from exc
+
+    def require_extension_admin(req: Request) -> None:
+        """Allow only authenticated, local administrative extension requests.
+
+        No browser Basic auth, admin token or token hints are ever returned to
+        page content, a content script or an agent's MCP session.
+        """
+        if (req.url.hostname or "").lower() not in ("localhost", "127.0.0.1", "::1"):
+            raise HTTPException(403, "Administrative access is loopback-only")
+        if not req.client or req.client.host not in (
+            "localhost", "127.0.0.1", "::1", "testclient"
+        ):
+            raise HTTPException(403, "Administrative access is loopback-only")
+        origin = req.headers.get("origin", "")
+        if origin and not origin.startswith("chrome-extension://"):
+            raise HTTPException(403, "Extension origin required")
+        secret = req.headers.get("x-agent-network-admin-token", "")
+        if not secret or not secrets.compare_digest(secret, admin_token):
+            raise HTTPException(403, "Invalid administrator token")
+
+    @app.get("/api/v1/admin/teams")
+    def extension_team_list(req: Request) -> JSONResponse:
+        require_extension_admin(req)
+        return JSONResponse({"items": store.team_list()},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/admin/me/teams")
+    def extension_own_teams(req: Request) -> dict:
+        require_extension_admin(req)
+        agent_id, token = agent_view_credentials(req)
+        with store.lock:
+            store.verify(agent_id, token)
+            return {"agent_id": agent_id, "teams": store._teams(agent_id)}
+
+    @app.put("/api/v1/admin/me/teams")
+    def extension_assign_teams(body: TeamAssignment, req: Request) -> dict:
+        require_extension_admin(req)
+        agent_id, token = agent_view_credentials(req)
+        try:
+            # Only the locally bound agent may be managed from its popup.
+            store.verify(agent_id, token)
+            return store.assign_teams(agent_id, body.teams)
+        except ValueError as exc:
+            status = 404 if str(exc) == "Unknown agent_id" else 400
+            raise HTTPException(status, str(exc)) from exc
+
     @app.get("/api/v1/dashboard/conversations")
     def dashboard_conversations(agent_id: str, req: Request) -> JSONResponse:
         """Administrator-only peer list. Never returns message content or tokens."""
@@ -677,7 +750,7 @@ def create_app(config: Config | None = None) -> FastAPI:
 
     @app.get("/api/v1/agents")
     def agents_api() -> list[dict]:
-        # Metadata only; no inbox contents and no credentials.
+        # Admin-only metadata across all teams, no message content or credentials.
         return store.agents(present_ids={x[0] for x in broker.connections.values()})
 
     @app.websocket("/api/v1/channels/ws")

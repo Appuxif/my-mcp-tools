@@ -219,3 +219,15 @@ body.chat-open{overflow:hidden}
   .chat-message{max-width:96%}
 }
 @media(prefers-reduced-motion:reduce){.chat-drawer{animation:none}}
+
+/* Administrative team membership editor in the inspector. */
+.team-editor{margin-top:18px;padding:12px;background:#101f2e;border:1px solid #294a59;border-radius:9px}
+.team-editor-title{font-size:10px;letter-spacing:.08em;color:var(--cyan)}
+.team-editor-chips{display:flex;flex-wrap:wrap;gap:6px;margin:9px 0}
+.team-editor-chip{border:1px solid #386b70;color:#b9f1ea;background:#193b46;border-radius:6px;padding:5px 7px;font:500 11px system-ui;cursor:pointer}
+.team-editor-controls{display:flex;gap:5px;align-items:center}
+.team-editor-input{width:100%;min-width:0;background:#0b1826;border:1px solid #375264;border-radius:6px;color:#e9f6ff;padding:7px;font:11px system-ui}
+.team-editor-button,.team-editor-save{background:#20535c;border:1px solid #3b8585;color:#d5fff6;border-radius:6px;padding:7px 10px;font:600 11px system-ui;cursor:pointer}
+.team-editor-save{width:100%;margin-top:9px}
+.team-editor-save:disabled{opacity:.5;cursor:not-allowed}
+.team-editor-status{font-size:11px;color:var(--amber);overflow-wrap:anywhere;margin-top:6px}

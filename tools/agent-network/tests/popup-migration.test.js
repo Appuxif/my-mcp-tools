@@ -32,6 +32,9 @@ function createPopup({migrateFails=false,registered=false}={}) {
     name:'Existing-Worker',role:'Developer',purpose:'Build apps',description:'3D + Python',
     active:true,agentId:'agent-uuid',bootstrapDone:true,
   }:null;
+  let adminConfigured=false;
+  let currentTeams=[{team_id:'default',name:'default'}];
+  const secret='TEST_ADMIN_SECRET_'.repeat(4);
   const chrome={
     tabs:{async query(){return [{id:5,url:DEST}];}},
     runtime:{async sendMessage(msg){
@@ -43,6 +46,21 @@ function createPopup({migrateFails=false,registered=false}={}) {
         };
         case 'network:available-agents':
           return {ok:true,items:current?[]:[EXISTING]};
+        case 'network:admin-status':
+          return {ok:true,configured:adminConfigured,
+                  teams:[{name:'default'},{name:'Dev'},{name:'QA'}],
+                  agentTeams:current?currentTeams:[]};
+        case 'network:admin-connect':
+          if(msg.adminToken!==secret) return {ok:false,error:'Invalid admin token'};
+          adminConfigured=true;
+          return {ok:true,configured:true,teams:[{name:'default'}]};
+        case 'network:admin-clear':
+          adminConfigured=false;
+          return {ok:true,configured:false};
+        case 'network:admin-set-teams':
+          if(!adminConfigured || !current) return {ok:false,error:'Denied'};
+          currentTeams=msg.teams.map(name=>({team_id:name,name}));
+          return {ok:true,agent:{agent_id:current.agentId,teams:currentTeams}};
         case 'network:migration-preview':
           return {ok:true,migrate:true,agentId:'agent-uuid',name:'Existing-Worker',
             fromChatUrl:SOURCE,toChatUrl:DEST,needsNewChat:true};
@@ -60,7 +78,10 @@ function createPopup({migrateFails=false,registered=false}={}) {
   };
   const document={
     getElementById:el,
-    createElement:()=>({value:'',label:''}),
+    createElement:()=>({
+      value:'',label:'',textContent:'',disabled:false,listeners:{},
+      addEventListener(name,callback){this.listeners[name]=callback;},
+    }),
     addEventListener(name,callback){
       if(name==='DOMContentLoaded')onDOMContentLoaded=callback;
     },
@@ -144,4 +165,45 @@ test('unknown name still uses normal new agent registration',async()=>{
   await ui.click('start');
   assert.equal(ui.messages.filter(m=>m.type==='network:start').length,1);
   assert.equal(ui.messages.filter(m=>m.type==='network:migrate').length,0);
+});
+
+
+test('popup administrator can join multiple teams and remove memberships',async()=>{
+  const ui=createPopup({registered:true});await ui.ready();
+  assert.equal(ui.el('team-name').disabled,true);
+  ui.el('admin-token').value='TEST_ADMIN_SECRET_'.repeat(4);
+  await ui.click('admin-connect');
+  assert.equal(ui.el('admin-token').value,'','secret must be cleared from the DOM');
+  assert.equal(ui.el('team-name').disabled,false);
+  assert.equal(ui.el('known-teams').children.length,3);
+  assert.equal(ui.el('team-members').children.length,1);
+  ui.el('team-name').value='Dev';
+  await ui.click('team-add');
+  ui.el('team-name').value='QA';
+  await ui.click('team-add');
+  assert.equal(ui.el('team-members').children.length,3);
+  ui.el('team-members').children[0].listeners.click();
+  assert.equal(ui.el('team-members').children.length,2);
+  await ui.click('team-save');
+  const saved=ui.messages.find(m=>m.type==='network:admin-set-teams');
+  assert.deepEqual(Array.from(saved.teams),['Dev','QA']);
+  assert.equal(ui.el('admin-info').textContent,'Команды агента сохранены.');
+  await ui.click('admin-clear');
+  assert.equal(ui.el('team-name').disabled,true);
+  assert.equal(ui.el('team-save').disabled,true);
+});
+
+test('admin token is not part of agent profile or migration message',async()=>{
+  const ui=createPopup();await ui.ready();
+  ui.el('admin-token').value='TEST_ADMIN_SECRET_'.repeat(4);
+  await ui.click('admin-connect');
+  ui.el('name').value='New-Worker';
+  ui.el('role').value='Worker';
+  await ui.click('start');
+  const registration=ui.messages.find(m=>m.type==='network:start');
+  assert.ok(registration);
+  assert.equal(JSON.stringify(registration).includes('TEST_ADMIN_SECRET_'),false);
+  assert.equal('teams' in registration.profile,false);
+  assert.equal(ui.messages.some(m=>m.type==='network:admin-set-teams'),false,
+    'only explicit administrator Save can assign teams');
 });

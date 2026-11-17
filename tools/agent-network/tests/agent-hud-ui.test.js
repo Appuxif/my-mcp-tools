@@ -81,6 +81,12 @@ function createPage(registered=true, {delayInitialStatus=false}={}) {
       getURL(name){return 'chrome-extension://extension-id/'+name;},
       async sendMessage(msg) {
         requests.push(msg);
+        if(msg.type==='network:hud-preferences-get')
+          return {ok:true,pref:preferences['agentNetworkHud:'+msg.agentId]||{}};
+        if(msg.type==='network:hud-preferences-set') {
+          preferences['agentNetworkHud:'+msg.agentId]=msg.pref;
+          return {ok:true,saved:true};
+        }
         if(msg.type==='network:hud-open-dashboard') return {ok:true};
         if(msg.type==='network:hud-conversations') return {
           ok:true,agent_id:'a',agent_name:'Chopper-Developer',
@@ -184,7 +190,9 @@ test('HUD stays absent until explicit Show and then renders its metadata',async(
   assert.equal(page.els.get('ui-state').textContent,'Генерация');
   assert.equal(page.els.get('push').textContent,'Генерация');
   assert.equal(page.els.get('task').textContent,'Building avatar editor');
-  assert.deepEqual(Array.from(page.requests.map(r=>r.type)),['network:hud-status']);
+  assert.deepEqual(Array.from(page.requests.map(r=>r.type)),[
+    'network:hud-preferences-get','network:hud-preferences-set','network:hud-status'
+  ]);
   assert.equal(JSON.stringify(page.requests).includes('token'),false);
 });
 
@@ -240,7 +248,8 @@ test('HUD chat button opens private read-only modal with peer list and message b
   assert.equal(bubbles[0].children[1].textContent,'<img onerror=alert(1)>');
   assert.equal(page.els.get('chat-older').hidden,false);
   assert.deepEqual(Array.from(page.requests.map(r=>r.type)),[
-    'network:hud-status','network:hud-conversations','network:hud-messages'
+    'network:hud-preferences-get','network:hud-preferences-set','network:hud-status',
+    'network:hud-conversations','network:hud-messages'
   ]);
   assert.equal(JSON.stringify(page.requests).includes('token'),false);
   assert.equal(JSON.stringify(page.requests).includes('body'),false);

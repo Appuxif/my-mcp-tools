@@ -4,7 +4,60 @@ let tabId;
 let knownAgents=[];
 let ownAgent=null;
 let confirmedPreview=null;
+let adminReady=false;
+let selectedTeams=[];
+let availableTeams=[];
 const show = text => { $('status').textContent = text; };
+const nameKey = name => name.trim().toLocaleLowerCase();
+function renderTeamEditor() {
+  const box=$('team-members');
+  box.replaceChildren();
+  for (const name of selectedTeams) {
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='team-chip';
+    button.textContent=name+(adminReady && ownAgent ? ' ×' : '');
+    button.disabled=!adminReady || !ownAgent;
+    if(!button.disabled) button.addEventListener('click',()=>{
+      selectedTeams=selectedTeams.filter(other=>nameKey(other)!==nameKey(name));
+      renderTeamEditor();
+    });
+    box.append(button);
+  }
+  const editable=!!adminReady && !!ownAgent;
+  $('team-name').disabled=!editable;
+  $('team-add').disabled=!editable;
+  $('team-save').disabled=!editable || selectedTeams.length===0;
+}
+function updateTeamOptions(items) {
+  availableTeams=Array.isArray(items)?items:[];
+  const list=$('known-teams');
+  list.replaceChildren();
+  for (const team of availableTeams) {
+    const option=document.createElement('option');
+    option.value=team.name;
+    list.append(option);
+  }
+}
+async function refreshAdmin() {
+  try {
+    const data=await request('network:admin-status');
+    adminReady=!!data.configured;
+    updateTeamOptions(data.teams);
+    selectedTeams=adminReady
+      ? (data.agentTeams || []).map(t=>t.name)
+      : (ownAgent?.teams || []).map(t=>t.name);
+    $('admin-info').textContent=adminReady
+      ? 'Администратор подключён. Управление командами доступно.'
+      : 'Нет admin-token для этого сервера. Членство доступно только для просмотра.';
+  } catch(error) {
+    adminReady=false;
+    selectedTeams=(ownAgent?.teams || []).map(t=>t.name);
+    updateTeamOptions([]);
+    $('admin-info').textContent='Ошибка авторизации: '+String(error.message||error);
+  }
+  renderTeamEditor();
+}
 const cancelPreview = () => {
   confirmedPreview=null;
   $('migration-confirm').hidden=true;
@@ -65,6 +118,7 @@ async function refresh() {
            ' · ' + (s.ui?.activeRequests ?? 0) + ' запросов',
          s.entry.bootstrapDone ? '' : 'Требуется инициализация чата'].filter(Boolean).join('\n')
       : 'Этот чат пока не привязан к агенту. Выбери существующего по имени для переноса или создай нового.');
+    await refreshAdmin();
   } catch (e) { show(String(e.message || e)); }
 }
 function parseServer(raw) {
@@ -117,6 +171,56 @@ document.addEventListener('DOMContentLoaded', async () => {
       show('Плавающее окно открыто для этой беседы.');
     } catch (e) { show(String(e.message || e)); }
     finally { $('show-hud').disabled=false; }
+  });
+  $('admin-connect').addEventListener('click', async()=>{
+    $('admin-connect').disabled=true;
+    try {
+      const secret=$('admin-token').value.trim();
+      await request('network:admin-connect',{adminToken:secret});
+      $('admin-token').value=''; // Never leave the secret in popup DOM.
+      await refreshAdmin();
+    } catch(error) {
+      $('admin-info').textContent='Ошибка: '+String(error.message||error);
+    } finally { $('admin-connect').disabled=false; }
+  });
+  $('admin-clear').addEventListener('click', async()=>{
+    try {
+      await request('network:admin-clear');
+      $('admin-token').value='';
+      await refreshAdmin();
+    } catch(error) { $('admin-info').textContent=String(error.message||error); }
+  });
+  $('team-add').addEventListener('click',()=>{
+    const raw=$('team-name').value.trim();
+    const known=availableTeams.find(t=>nameKey(t.name)===nameKey(raw));
+    const name=known?.name || raw;
+    if(!name || name.length>64 || /[\x00-\x1f,]/.test(name) ||
+       selectedTeams.length>=12) {
+      $('admin-info').textContent='Необходимо имя команды до 64 символов (максимум 12).';
+      return;
+    }
+    if(!selectedTeams.some(existing=>nameKey(existing)===nameKey(name)))
+      selectedTeams.push(name);
+    $('team-name').value='';
+    renderTeamEditor();
+  });
+  $('team-name').addEventListener('keydown',event=>{
+    if(event.key==='Enter') {
+      event.preventDefault();
+      $('team-add').click();
+    }
+  });
+  $('team-save').addEventListener('click',async()=>{
+    $('team-save').disabled=true;
+    try {
+      const result=await request('network:admin-set-teams',{teams:selectedTeams});
+      selectedTeams=(result.agent.teams||[]).map(t=>t.name);
+      await refreshAdmin();
+      $('admin-info').textContent='Команды агента сохранены.';
+    } catch(error) {
+      $('admin-info').textContent='Ошибка сохранения: '+String(error.message||error);
+      renderTeamEditor();
+    }
   });
   $('name').addEventListener('input', fillExisting);
   for(const field of ['role','purpose','description'])

@@ -9,6 +9,7 @@ const CONVERSATION='6af61821-13e8-83eb-a4eb-548737722538';
 const PROJECT='https://chatgpt.com/g/g-p-6af61be7a30c8191a28628b8c44f715b-blender-edu/c/'+CONVERSATION;
 const PLAIN='https://chatgpt.com/c/'+CONVERSATION;
 const OTHER='https://chatgpt.com/c/6afc8b42-4bc8-83ed-8236-589f43d07958';
+const ADMIN_TEST_TOKEN='TEST_ADMIN_SECRET_'.repeat(4);
 
 function networkHarness({
   legacy=null,initial=null,urls=[PROJECT,PLAIN],
@@ -23,6 +24,8 @@ function networkHarness({
   };
   const tabs = new Map(urls.map((url,i)=>[i+10,{id:i+10,url}]));
   const events=[],sockets=[],listeners={},intervals=new Map();
+  const adminTeamMembership=new Map();
+  let storageAccessLevel=null;
   let nextIntervalId=1;
   const hook=name=>({addListener(fn){listeners[name]=fn;}});
   const chrome={
@@ -59,6 +62,7 @@ function networkHarness({
     },
     scripting:{async executeScript(){events.push({kind:'inject'});}},
     storage:{local:{
+      async setAccessLevel(options){storageAccessLevel=options.accessLevel;},
       async get(keys){
         if(Array.isArray(keys))return Object.fromEntries(
           keys.filter(k=>k in data).map(k=>[k,structuredClone(data[k])])
@@ -101,6 +105,30 @@ function networkHarness({
   let created=0;
   const fetch=async (url,options)=>{
     events.push({kind:'http',url,method:options.method});
+    if(url.endsWith('/api/v1/admin/teams') ||
+       url.endsWith('/api/v1/admin/me/teams')) {
+      if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
+        return {ok:false,status:403,async json(){return {detail:'Invalid administrator token'}}};
+      const available=[{team_id:'default',name:'default'},
+        {team_id:'dev',name:'Dev'},{team_id:'qa',name:'QA'}];
+      if(url.endsWith('/api/v1/admin/teams'))
+        return {ok:true,status:200,async json(){return {items:available}}};
+      const agentId=options.headers['X-Agent-Id'];
+      const token=options.headers['X-Agent-Token'];
+      if(!agentId || token!=='PRIVATE_AGENT_SECRET')
+        return {ok:false,status:403,async json(){return {detail:'Invalid agent token'}}};
+      if(options.method==='PUT') {
+        const teams=JSON.parse(options.body).teams;
+        adminTeamMembership.set(agentId,teams.map(name=>({team_id:name,name})));
+        return {ok:true,status:200,async json(){
+          return {agent_id:agentId,teams:adminTeamMembership.get(agentId)};
+        }};
+      }
+      return {ok:true,status:200,async json(){
+        return {agent_id:agentId,
+                teams:adminTeamMembership.get(agentId)||[{team_id:'default',name:'default'}]};
+      }};
+    }
     if(url.endsWith('/api/v1/agents/register')){
       if(registrationDelay) await new Promise(resolve=>setTimeout(resolve,registrationDelay));
       created++;
@@ -137,13 +165,16 @@ function networkHarness({
   const request=(tabId,type,extra={})=>
     new Promise(resolve=>listeners.message({type,tabId,...extra},
       {tab:tabs.get(tabId),frameId:0},resolve));
+  const popupRequest=(tabId,type,extra={})=>
+    new Promise(resolve=>listeners.message({type,tabId,...extra},{},resolve));
   const start=tabId=>request(tabId,'network:start',{profile:{
     name:'Same-Agent',role:'Developer',purpose:'Testing',description:'',
   }});
   const tick=async()=>{
     for(let i=0;i<12;i++)await new Promise(resolve=>setImmediate(resolve));
   };
-  return {data,tabs,sockets,events,context,request,start,tick,
+  return {data,tabs,sockets,events,context,request,popupRequest,start,tick,
+    get storageAccessLevel(){return storageAccessLevel;},
     close:async tabId=>{
       tabs.delete(tabId);listeners.removed(tabId);await tick();
     },
@@ -685,4 +716,85 @@ test('two overlapping per-tab server preference writes do not lose updates',asyn
   await Promise.all([a,b]);
   assert.equal(h.data.serverByTab[10],'https://a.example');
   assert.equal(h.data.serverByTab[11],'https://b.example');
+});
+
+
+test('admin-only popup can assign multiple teams; ChatGPT tab cannot use admin token',async()=>{
+  const h=networkHarness();
+  await h.start(10);
+  assert.equal(h.storageAccessLevel,'TRUSTED_CONTEXTS');
+  const tabDenied=await h.request(10,'network:admin-connect',{adminToken:ADMIN_TEST_TOKEN});
+  assert.equal(tabDenied.ok,false);
+  assert.match(tabDenied.error,/popup-only/);
+  const invalid=await h.popupRequest(10,'network:admin-connect',{adminToken:'bad secret'});
+  assert.equal(invalid.ok,false);
+  const connected=await h.popupRequest(10,'network:admin-connect',{adminToken:ADMIN_TEST_TOKEN});
+  assert.equal(connected.ok,true,connected.error);
+  const before=await h.popupRequest(10,'network:admin-status');
+  assert.equal(before.ok,true);
+  assert.deepEqual(Array.from(before.agentTeams.map(t=>t.name)),['default']);
+  const selected=await h.popupRequest(10,'network:admin-set-teams',{teams:['Dev','QA']});
+  assert.equal(selected.ok,true,selected.error);
+  assert.deepEqual(Array.from(selected.agent.teams.map(t=>t.name)),['Dev','QA']);
+  const after=await h.popupRequest(10,'network:admin-status');
+  assert.deepEqual(Array.from(after.agentTeams.map(t=>t.name)),['Dev','QA']);
+  const denied=await h.request(10,'network:admin-set-teams',{teams:['secret']});
+  assert.equal(denied.ok,false);
+  assert.match(denied.error,/popup-only/);
+  const prompt=h.events.find(e=>e.type==='agent:send').body.text;
+  assert.equal(prompt.includes(ADMIN_TEST_TOKEN),false);
+  const exposed=await h.request(10,'network:status');
+  assert.equal(JSON.stringify(exposed).includes(ADMIN_TEST_TOKEN),false);
+  const cleared=await h.popupRequest(10,'network:admin-clear');
+  assert.equal(cleared.ok,true);
+  const status=await h.popupRequest(10,'network:admin-status');
+  assert.equal(status.configured,false);
+  const rejected=await h.popupRequest(10,'network:admin-set-teams',{teams:['Dev']});
+  assert.equal(rejected.ok,false);
+});
+
+test('popup admin-token follows server origin and is not available in another tab without auth',async()=>{
+  const h=networkHarness();
+  await h.start(10);
+  assert.equal((await h.popupRequest(10,'network:admin-connect',
+    {adminToken:ADMIN_TEST_TOKEN})).ok,true);
+  const old=h.data.adminTokenByServer;
+  assert.equal(old['http://127.0.0.1:8787'],ADMIN_TEST_TOKEN);
+  assert.equal(Object.keys(old).length,1);
+  // An unrelated tab/content script cannot read administrator status.
+  const bad=await h.request(11,'network:admin-status');
+  assert.equal(bad.ok,false);
+  assert.match(bad.error,/popup-only/);
+});
+
+test('administrator secret never leaves the extension for a remote server',async()=>{
+  const h=networkHarness({urls:[PLAIN,OTHER]});
+  h.data.serverByTab[11]='https://remote.example';
+  const result=await h.popupRequest(11,'network:admin-connect',{
+    adminToken:ADMIN_TEST_TOKEN
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/локальный сервер/);
+  assert.equal(h.events.some(e=>e.kind==='http' &&
+    e.url.startsWith('https://remote.example/api/v1/admin')),false);
+  assert.equal(h.data.adminTokenByServer,undefined);
+});
+
+test('HUD preference bridge requires a bound sender identity',async()=>{
+  const h=networkHarness({urls:[PLAIN,OTHER]});
+  await h.start(10);
+  const agentId=h.data.agentsByChat[PLAIN].agentId;
+  const saved=await h.request(10,'network:hud-preferences-set',{
+    agentId,pref:{mode:'icon',x:160,y:50}
+  });
+  assert.equal(saved.ok,true);
+  const loaded=await h.request(10,'network:hud-preferences-get',{agentId});
+  assert.equal(loaded.pref.mode,'icon');
+  assert.equal(loaded.pref.x,160);
+  assert.equal((await h.request(10,'network:hud-preferences-get',{
+    agentId:'another'
+  })).ok,false);
+  assert.equal((await h.request(11,'network:hud-preferences-get',{
+    agentId
+  })).ok,false);
 });

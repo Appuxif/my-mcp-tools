@@ -4,7 +4,6 @@
   if (globalThis.__agentNetworkHud) return;
   globalThis.__agentNetworkHud = true;
 
-  const STORAGE_PREFIX = 'agentNetworkHud:';
   const POLL_MS = 12000;
   const ago = value => AgentNetworkStatus.ago(value);
   const labels = {
@@ -395,8 +394,11 @@
   }
   async function loadPreferences(id) {
     try {
-      const key=STORAGE_PREFIX+id;
-      const pref=(await chrome.storage.local.get(key))[key] || {};
+      const response=await chrome.runtime.sendMessage({
+        type:'network:hud-preferences-get',agentId:id,
+      });
+      if(!response?.ok) return;
+      const pref=response.pref || {};
       if(id!==agentId) return;
       position=Number.isFinite(pref.x) && Number.isFinite(pref.y)
         ? {x:pref.x,y:pref.y} : null;
@@ -406,9 +408,10 @@
   async function savePreferences() {
     if(!agentId) return;
     try {
-      await chrome.storage.local.set({[STORAGE_PREFIX+agentId]:{
-        mode,x:position?.x ?? null,y:position?.y ?? null
-      }});
+      await chrome.runtime.sendMessage({
+        type:'network:hud-preferences-set',agentId,
+        pref:{mode,x:position?.x ?? null,y:position?.y ?? null},
+      });
     } catch { /* preference is optional */ }
   }
 

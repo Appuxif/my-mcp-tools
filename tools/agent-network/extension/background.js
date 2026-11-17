@@ -12,6 +12,14 @@ chrome.webRequest.onErrorOccurred.addListener(
   details => traffic.finished(details), completionFilter
 );
 const DEFAULT_SERVER = 'http://127.0.0.1:8787';
+// Administrator tokens require the trusted-context storage boundary.
+// If it cannot be established, fail closed rather than making the stored
+// secret accessible to a ChatGPT content script.
+const adminStorageProtected=chrome.storage.local.setAccessLevel
+  ? chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'})
+  : Promise.reject(Error('Chrome does not support trusted-context storage'));
+void adminStorageProtected.catch(()=>{});
+const ADMIN_STORE_KEY='adminTokenByServer';
 function normalizeServer(raw) {
   const url = new URL((raw || '').trim());
   if (!['http:', 'https:'].includes(url.protocol)) throw Error('Server URL must be HTTP or HTTPS');
@@ -27,6 +35,90 @@ function normalizeServer(raw) {
   return url.origin;
 }
 const socketUrl = server => server.replace(/^http/, 'ws') + '/api/v1/channels/ws';
+
+// Administrator token is stored per-server in extension-only local storage,
+// never in a conversation record or the ChatGPT bootstrap prompt.
+let adminWriteQueue=Promise.resolve();
+function changeAdminTokens(mutator) {
+  const op=adminWriteQueue.catch(()=>{}).then(async()=>{
+    await adminStorageProtected;
+    const stored=(await chrome.storage.local.get(ADMIN_STORE_KEY))[ADMIN_STORE_KEY] || {};
+    const next={...stored};
+    mutator(next);
+    await chrome.storage.local.set({[ADMIN_STORE_KEY]:next});
+  });
+  adminWriteQueue=op.catch(()=>{});
+  return op;
+}
+async function adminToken(server) {
+  await adminStorageProtected;
+  const stored=(await chrome.storage.local.get(ADMIN_STORE_KEY))[ADMIN_STORE_KEY] || {};
+  return stored[server] || '';
+}
+async function adminRequest(server, secret, path, method='GET', body=null, record=null) {
+  const hostname=new URL(server).hostname;
+  if(!['127.0.0.1','localhost','[::1]'].includes(hostname))
+    throw Error('Администрирование команд доступно только через локальный сервер.');
+  const headers={'Accept':'application/json', 'X-Agent-Network-Admin-Token':secret};
+  if(body!==null) headers['Content-Type']='application/json';
+  if(record) {
+    headers['X-Agent-Id']=record.agentId;
+    headers['X-Agent-Token']=record.token;
+  }
+  const response=await fetch(server+path,{
+    method,headers,cache:'no-store',
+    body:body!==null ? JSON.stringify(body) : undefined,
+    signal:AbortSignal.timeout(8000),
+  });
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok) throw Error(data.detail || 'Admin HTTP '+response.status);
+  return data;
+}
+async function adminConnect(tabId, secret) {
+  await adminStorageProtected;
+  if(typeof secret!=='string' || secret.length<40 || secret.length>256)
+    throw Error('Укажи корректный admin-token.');
+  const {record}=await currentRecord(tabId);
+  const server=await serverForTab(tabId,record);
+  const data=await adminRequest(server,secret,'/api/v1/admin/teams');
+  await changeAdminTokens(tokens=>{tokens[server]=secret;});
+  return {configured:true,teams:data.items};
+}
+async function adminStatus(tabId) {
+  const {record}=await currentRecord(tabId);
+  const server=await serverForTab(tabId,record);
+  const secret=await adminToken(server);
+  if(!secret) return {configured:false,teams:[]};
+  const data=await adminRequest(server,secret,'/api/v1/admin/teams');
+  let agentTeams=[];
+  if(record?.agentId && record?.token) {
+    const own=await adminRequest(server,secret,'/api/v1/admin/me/teams',
+                                 'GET',null,record);
+    if(own.agent_id===record.agentId) agentTeams=own.teams;
+  }
+  return {configured:true,teams:data.items,agentTeams};
+}
+async function adminClear(tabId) {
+  const {record}=await currentRecord(tabId);
+  const server=await serverForTab(tabId,record);
+  await changeAdminTokens(tokens=>{delete tokens[server];});
+  return {configured:false};
+}
+async function adminSetTeams(tabId,teams) {
+  const {key,record}=await currentRecord(tabId);
+  if(!key || !record?.token) throw Error('Сначала зарегистрируй агента.');
+  const server=await serverForTab(tabId,record);
+  const secret=await adminToken(server);
+  if(!secret) throw Error('Сначала укажи admin-token.');
+  const agent=await adminRequest(server,secret,'/api/v1/admin/me/teams',
+                                 'PUT',{teams},record);
+  if(agent.agent_id!==record.agentId)
+    throw Error('Административный сервер вернул другого агента.');
+  await updateRecords(entries=>{
+    if(entries[key]?.agentId===record.agentId) entries[key].teams=agent.teams;
+  });
+  return {agent};
+}
 async function serverForTab(tabId, record = null) {
   const data = await chrome.storage.local.get(['serverByTab', 'defaultServer']);
   return normalizeServer(
@@ -384,6 +476,32 @@ async function hudStatus(sender) {
   }
 }
 
+async function hudPreferences(sender, agentId, pref=null) {
+  const tabId=sender?.tab?.id;
+  const key=chatKey(sender?.tab?.url);
+  if(tabId==null || sender?.frameId!==0 || !key)
+    throw Error('HUD preferences require a bound ChatGPT tab');
+  const actual=await chrome.tabs.get(tabId).catch(()=>null);
+  const record=(await storage())[key];
+  if(chatKey(actual?.url)!==key || !record?.agentId ||
+     record.agentId!==agentId)
+    throw Error('HUD preference identity mismatch');
+  const prefKey='agentNetworkHud:'+record.agentId;
+  if(pref===null) {
+    const stored=(await chrome.storage.local.get(prefKey))[prefKey] || {};
+    return {pref:stored};
+  }
+  if(typeof pref!=='object' || Array.isArray(pref) ||
+     !['full','collapsed','icon'].includes(pref.mode) ||
+     ![pref.x,pref.y].every(n=>n===null ||
+       (typeof n==='number' && Number.isFinite(n) && Math.abs(n)<1e6)))
+    throw Error('Invalid HUD preferences');
+  await chrome.storage.local.set({[prefKey]:{
+    mode:pref.mode,x:pref.x,y:pref.y,
+  }});
+  return {saved:true};
+}
+
 async function hudConversationRequest(sender, peerId = null, before = '', limit = 30) {
   // The caller cannot pick an agent_id or supply its token. Both come from the
   // extension's own per-tab identity, never from page-controlled input.
@@ -478,6 +596,8 @@ function bootstrapPrompt(record, migrated=false) {
     'Role: ' + record.role,
     'Purpose: ' + record.purpose,
     'Description: ' + record.description,
+    'Team membership is read-only for agents; only a human administrator can change teams.',
+    'Use list_agents to discover peers sharing one or more of your teams.',
     'Use the native agent-network MCP tools for ALL inter-agent messages.',
     'agent_id: ' + record.agentId,
     'token: ' + record.token,
@@ -770,6 +890,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
             agentId:record.agentId,name:record.name,role:record.role,
             purpose:record.purpose,description:record.description,
             active:record.active,chatUrl:key,bootstrapDone:record.bootstrapDone,
+            teams:record.teams || [],
           },
           connected:record ?
             connections.get(Number(record.ownerTabId))?.socket.readyState===WebSocket.OPEN : false,
@@ -777,6 +898,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         };
       }
       case 'network:hud-status': return hudStatus(sender);
+      case 'network:hud-preferences-get':
+        return hudPreferences(sender,message.agentId);
+      case 'network:hud-preferences-set':
+        return hudPreferences(sender,message.agentId,message.pref);
       case 'network:hud-conversations': return hudConversationRequest(sender);
       case 'network:hud-messages':
         return hudConversationRequest(sender, message.peerId, message.before || '', message.limit || 30);
@@ -789,6 +914,19 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         return {visible:true};
       }
       case 'network:available-agents': return availableAgents(message.tabId);
+      case 'network:admin-status':
+      case 'network:admin-connect':
+      case 'network:admin-clear':
+      case 'network:admin-set-teams': {
+        // Unprivileged page and content-script messages cannot use saved
+        // administrator credentials. Only extension popup messages can.
+        if(sender?.tab) throw Error('Admin operations are popup-only');
+        if(message.type==='network:admin-status') return adminStatus(message.tabId);
+        if(message.type==='network:admin-connect')
+          return adminConnect(message.tabId,message.adminToken);
+        if(message.type==='network:admin-clear') return adminClear(message.tabId);
+        return adminSetTeams(message.tabId,message.teams);
+      }
       case 'network:migration-preview':
         return migrationPreview(message.tabId,message.name);
       case 'network:migrate':

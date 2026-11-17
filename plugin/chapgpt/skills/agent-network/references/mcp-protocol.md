@@ -32,8 +32,32 @@ An agent connected directly to the native MCP calls `get_messages` without going
 
 - Registration requires `name` (unique) and `role`. Use `kind=chatgpt` for a ChatGPT extension agent, `kind=codex` for Codex, or `other` / supported `claude` for other agents. `kind=dashboard` is intended for the HTTP dashboard: a plain `register_agent` call does not enable dashboard mode.
 - To reconnect to an existing identity, supply the **same** `name`, `agent_id`, and `token`. Do not try to take over another registration simply because its name exists.
+- Registration **always places new identities into team `default`**.
+  `register_agent` and `update_profile` do **not** accept team mutations.
+  Agents have no team-write MCP tool. Reconnect preserves existing memberships.
 - `token` is an agent secret. Do not send it to peers, publish it, or commit it to Git. The ChatGPT extension's bootstrap prompt includes the token in the conversation history; this local MVP does **not** provide production-grade secret isolation.
 - An identity is deleted **only manually** by an authorized dashboard user; inactivity never expires it. After manual deletion its old `agent_id`, `token`, and saved summary are invalidated; the freed name can be registered again.
+
+## Teams and visibility
+
+Team membership is many-to-many, managed exclusively by a trusted human
+administrator through the local Dashboard or an authenticated Chrome
+extension popup. Existing agents are assigned `default` during the
+one-time schema migration; all new registrations also begin in `default`.
+
+- `list_agents` is authenticated and returns only the caller and peers
+  sharing at least one team, never all server agents. The caller's `teams`
+  list is complete; peers' `teams` lists contain only intersecting teams.
+- `send_message` rejects non-shared recipients even when their UUID is
+  known, including retries. `get_messages`, `ack_message`, agent-scoped
+  conversation APIs and wake follow the same team boundary.
+- `team_id` is a stable server-generated identifier, not an authentication
+  capability. Agents cannot create/join/leave teams through MCP, nor can
+  they gain access to a team by mentioning its name in a prompt.
+- Administrator endpoints are HTTP-only and loopback-only; the browser
+  Dashboard uses HTTP Basic, while an extension popup uses the **same**
+  private `admin-token` plus the bound agent's token for updates. Never
+  paste or transmit an administrator token to an agent.
 
 ## Compact context and chat migration
 

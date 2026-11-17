@@ -37,6 +37,9 @@
 
   let snapshot = null;
   let selectedId = null;
+  // Keep the user's unsaved edits across live 5-second dashboard refreshes.
+  const teamDrafts=new Map();
+  const teamName = value => String(value||'').trim().toLocaleLowerCase();
   let inflight = false;
   let graphZoom = 1;
   let graphDimensions = {width:900,height:415};
@@ -225,6 +228,7 @@
     const fields = [
       ['Состояние', agent.online ? 'Онлайн' : 'Офлайн'],
       ['Тип', agent.kind],
+      ['Команды', (agent.teams||[]).map(t=>t.name).join(', ') || '—'],
       ['Задача', statusName(agent.task_status)],
       ['MCP-активность', relative(agent.last_mcp_activity)],
       ['Последний опрос', relative(agent.last_poll_at)],
@@ -237,6 +241,82 @@
       add(row, 'span', '', label);
       const strong = add(row, 'strong', '', value);
       strong.title = value;
+    });
+    // Admin-only editor. The browser's existing HTTP Basic session is sent
+    // same-origin; agent tokens and context are never needed.
+    const editor=add(el,'div','team-editor');
+    add(editor,'strong','team-editor-title','КОМАНДЫ АГЕНТА · ADMIN');
+    const original=(agent.teams||[]).map(t=>t.name);
+    if(!teamDrafts.has(agent.agent_id))
+      teamDrafts.set(agent.agent_id,{names:[...original],input:'',dirty:false});
+    const draft=teamDrafts.get(agent.agent_id);
+    if(!draft.dirty) draft.names=[...original];
+    const chips=add(editor,'div','team-editor-chips');
+    const refreshDraft=()=>inspector(data);
+    for(const name of draft.names) {
+      const chip=add(chips,'button','team-editor-chip',name+' ×');
+      chip.type='button';
+      chip.title='Убрать из команды';
+      chip.addEventListener('click',()=>{
+        draft.names=draft.names.filter(t=>teamName(t)!==teamName(name));
+        draft.dirty=true;
+        refreshDraft();
+      });
+    }
+    const controls=add(editor,'div','team-editor-controls');
+    const input=add(controls,'input','team-editor-input');
+    input.setAttribute('list','dashboard-team-list');
+    input.placeholder='Новая или существующая команда';
+    input.maxLength=64;
+    input.value=draft.input;
+    input.addEventListener('input',()=>{draft.input=input.value;draft.dirty=true;});
+    const options=add(editor,'datalist','');
+    options.id='dashboard-team-list';
+    for(const team of data.teams||[]) {
+      const option=add(options,'option','');
+      option.value=team.name;
+    }
+    const addButton=add(controls,'button','team-editor-button','+');
+    addButton.type='button';
+    const addTeam=()=>{
+      const entered=input.value.trim();
+      const known=(data.teams||[]).find(t=>teamName(t.name)===teamName(entered));
+      const name=known?.name||entered;
+      if(!name || name.length>64 || /[\x00-\x1f,]/.test(name) ||
+         draft.names.length>=12) return;
+      if(!draft.names.some(t=>teamName(t)===teamName(name))) draft.names.push(name);
+      draft.input='';
+      draft.dirty=true;
+      refreshDraft();
+    };
+    addButton.addEventListener('click',addTeam);
+    input.addEventListener('keydown',event=>{
+      if(event.key==='Enter'){event.preventDefault();addTeam();}
+    });
+    const save=add(editor,'button','team-editor-save','Сохранить команды');
+    save.type='button';
+    save.disabled=!draft.names.length;
+    const notice=add(editor,'div','team-editor-status','');
+    save.addEventListener('click',async()=>{
+      save.disabled=true;
+      notice.textContent='Сохраняю…';
+      try {
+        const response=await fetch(
+          new URL('/api/v1/dashboard/agents/'+encodeURIComponent(agent.agent_id)+'/teams',
+                  location.origin).href, {
+            method:'PUT',cache:'no-store',credentials:'same-origin',
+            headers:{'Accept':'application/json','Content-Type':'application/json'},
+            body:JSON.stringify({teams:draft.names}),
+          }
+        );
+        const result=await response.json().catch(()=>({}));
+        if(!response.ok) throw Error(result.detail||'HTTP '+response.status);
+        teamDrafts.delete(agent.agent_id);
+        document.dispatchEvent(new CustomEvent('agent-network:refresh'));
+      } catch(error) {
+        notice.textContent='Ошибка: '+String(error.message||error);
+        save.disabled=false;
+      }
     });
     const task = add(el, 'div', 'inspect-task');
     add(task, 'span', '', 'ТЕКУЩАЯ ЗАДАЧА');
@@ -262,6 +342,8 @@
       const colName = add(tr, 'td', '');
       add(colName, 'span', 'agent-name', agent.name);
       add(colName, 'span', 'agent-kind', agent.kind + ' · ' + (agent.role || 'без роли'));
+      add(colName, 'span', 'agent-kind',
+          'Команды: '+(agent.teams||[]).map(t=>t.name).join(', '));
       const status = add(tr, 'td', '');
       add(status, 'span', 'status-pill' + (agent.online ? '' : ' off'),
         agent.online ? 'Онлайн' : 'Офлайн');

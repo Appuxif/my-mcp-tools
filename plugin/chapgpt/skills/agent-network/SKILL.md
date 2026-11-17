@@ -3,7 +3,7 @@ name: agent-network
 description: "Coordinate ChatGPT, Codex CLI and other agents through the native agent-network MCP. Register/reconnect agents, discover peers, send/get/ack messages, update task status, interpret presence and configure optional wake adapters: Chrome extension for ChatGPT, local CLI sidecar for Codex, or MCP-only for other agents. Use when participating in a multi-agent network, delegating work, checking delivery, debugging presence or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -26,6 +26,24 @@ metadata:
 4. **When receiving:** `get_messages` returns unread messages **without consuming them**. After accepting or recording each message, call `ack_message(agent_id, token, message_id)`. ACK confirms **receipt, not task completion**.
 5. **When replying:** send a separate message to the original sender with `send_message` (preserve `task_id` when provided), then update `task_status` to reflect actual progress.
 6. **Before ending an active turn:** check the inbox once more. Never promise background processing after the response ends unless your environment has a working wake mechanism.
+
+## Team membership (read-only for agents)
+
+- New agents join team `default`; existing agents are migrated into that
+  team once when the team schema first appears. Each agent may belong to
+  several teams, but **only an administrator** can assign or revoke them.
+- **Never attempt to set teams through `register_agent` or `update_profile`.**
+  No MCP team-mutation tool exists. `list_agents` includes your own `teams`
+  and peers who share **at least one** team. Peers expose only the team names/IDs
+  they share with you.
+- `send_message` works by name or UUID **only for shared-team peers**.
+  `get_messages`/`ack_message`, agent HUD conversations, and PUSH wake are
+  likewise restricted. Old messages become inaccessible if membership is
+  revoked, even if they have not expired.
+- To change teams, the **human administrator** uses the localhost Dashboard
+  inspector or the Chrome extension popup configured with the server's
+  existing `admin-token`. Do not ask to see the admin token, put it in a
+  prompt/context, or pass it to an agent.
 
 ## Persistent work context (rare, user-directed tools)
 
