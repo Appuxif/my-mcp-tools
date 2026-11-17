@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Network</title>
+<style>
+:root{font:13px/1.5 system-ui,sans-serif;color:#e8f1ff;background:#0c1421}
+*{box-sizing:border-box}
+body{width:365px;margin:0;padding:19px}
+.head{display:flex;align-items:center;gap:10px;margin-bottom:17px}
+.logo{height:34px;width:34px;border:1px solid #2b747c;border-radius:10px;background:#102c36;display:grid;place-items:center;color:#49dcca;font-size:19px}
+h1{font-size:17px;letter-spacing:.025em;margin:0;font-weight:700}
+.head small{display:block;color:#8da3be;font-size:10px;letter-spacing:.1em}
+.section{background:#121f31;border:1px solid #293c53;border-radius:11px;padding:13px;margin-bottom:13px}
+.section-title{font-size:10px;letter-spacing:.14em;font-weight:800;color:#53dccc;margin-bottom:8px}
+label{display:block;margin:10px 0 4px;font-size:11px;color:#b7c8df}
+input,textarea{font:inherit;color:#eaf1fc;width:100%;padding:9px 10px;background:#0d1827;border:1px solid #374c63;border-radius:7px;outline:none}
+input:focus,textarea:focus{border-color:#4dd9d1;box-shadow:0 0 0 2px #43d9d120}
+input:disabled{opacity:.6}
+textarea{height:59px;resize:vertical}
+button{border:1px solid transparent;color:white;border-radius:7px;padding:9px 12px;cursor:pointer;font:600 12px system-ui}
+button:focus-visible{outline:2px solid #53dccc}
+button:disabled{opacity:.45;cursor:default}
+button.primary{background:#267e89}
+button.secondary{background:#1d3149;border-color:#345472;color:#cee1f4}
+button.ghost{background:#162438;border-color:#2c425d;color:#b9cee6}
+.server-actions{display:flex;gap:8px;margin-top:9px}
+.server-actions button{flex:1}
+#server{font:12px system-ui}
+.agent-actions{display:flex;gap:9px;margin-top:14px}
+.agent-actions button{flex:1}
+#status{font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;background:#112236;border:1px solid #263b54;border-radius:8px;padding:11px 12px;min-height:50px;color:#b3d1eb}
+small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="head"><div class="logo">◈</div><div><h1>Agent Network</h1><small>WAKE ADAPTER · CHATGPT</small></div></div>
+
+<section class="section">
+<div class="section-title">СЕРВЕР</div>
+<label for="server">Адрес Agent Network</label>
+<input id="server" type="url" spellcheck="false" placeholder="http://127.0.0.1:8787">
+<div class="server-actions">
+<button class="secondary" id="save-server">Применить</button>
+<button class="ghost" id="open-dashboard">↗ Панель состояния</button>
+</div>
+<small class="hint">При смене сервера сначала остановите агента. Для удалённого адреса нужен доступный HTTPS endpoint.</small>
+</section>
+
+<section class="section">
+<div class="section-title">АГЕНТ · ЭТА ВКЛАДКА</div>
+<label for="name">Имя</label><input id="name" maxlength="64" placeholder="frontend-agent">
+<label for="role">Роль</label><input id="role" maxlength="120" placeholder="Frontend developer">
+<label for="purpose">Назначение</label><input id="purpose" maxlength="1000" placeholder="Работа над интерфейсом">
+<label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
+<div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button></div>
+</section>
+
+<div id="status" role="status">Проверяю состояние…</div>
+<small class="hint">Пробуждение передаёт только сигнал. Агент получает и подтверждает сообщения через MCP. Приватный токен сохраняется в браузере и попадает в первоначальный промпт чата.</small>
+<script src="popup.js"></script>
+</body>
+</html>

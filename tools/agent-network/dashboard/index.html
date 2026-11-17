@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <link rel="icon" href="data:,">
+  <title>Agent Network · Control Center</title>
+  <link rel="stylesheet" href="/dashboard-assets/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 40 40" width="40" height="40"><path d="M20 6L33 14V26L20 34L7 26V14Z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="20" cy="10" r="3.5"/><circle cx="10" cy="24" r="3.5"/><circle cx="30" cy="24" r="3.5"/><path d="M20 13L11 22M20 13L29 22M13 24H27" stroke="currentColor" stroke-width="1.5"/></svg>
+        </div>
+        <div>
+          <h1>AGENT<span>NETWORK</span></h1>
+          <div class="subtitle">Оркестрация · Наблюдение · Связь</div>
+        </div>
+      </div>
+      <div class="top-right">
+        <div class="server-state" id="server-state"><span class="live-dot"></span><span id="server-label">Подключение…</span></div>
+        <div class="head-clock"><span id="clock">—</span><small>Локальное время</small></div>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div>
+        <div class="eyebrow"><span class="eyebrow-line"></span> CONTROL CENTER <span class="revision">v0.1</span></div>
+        <h2>Агентская сеть <span class="subhead">в реальном времени.</span></h2>
+        <p>Наблюдение за сессиями, очередями сообщений и каналами пробуждения в одной панели.</p>
+      </div>
+      <div class="hero-info">
+        <div><span>ТРАНСПОРТ</span><strong>MCP + WebSocket</strong></div>
+        <div><span>ВРЕМЯ РАБОТЫ</span><strong id="uptime">—</strong></div>
+        <div><span>ОБНОВЛЕНИЕ</span><strong>каждые 3 с <span class="refresh-indicator"></span></strong></div>
+      </div>
+    </section>
+
+    <section class="stats" aria-label="Метрики сервера">
+      <article class="stat"><div class="stat-top"><span>Агенты</span><span class="stat-icon">◈</span></div><strong id="metric-agents">—</strong><small id="metric-agents-note">Зарегистрировано</small></article>
+      <article class="stat"><div class="stat-top"><span>Онлайн</span><span class="stat-icon sea">◉</span></div><strong id="metric-online">—</strong><small>Недавняя активность</small></article>
+      <article class="stat"><div class="stat-top"><span>В очереди</span><span class="stat-icon amber">↗</span></div><strong id="metric-queued">—</strong><small>Ожидают подтверждения</small></article>
+      <article class="stat"><div class="stat-top"><span>За 24 часа</span><span class="stat-icon">▥</span></div><strong id="metric-messages">—</strong><small>Отправлено сообщений</small></article>
+      <article class="stat"><div class="stat-top"><span>Адаптеры</span><span class="stat-icon sea">⌁</span></div><strong id="metric-adapters">—</strong><small>Подключённые PUSH-каналы</small></article>
+    </section>
+
+    <section class="visual-layout">
+      <article class="panel flow-panel">
+        <div class="panel-heading">
+          <div><div class="section-overline">NETWORK MAP</div><h3>Карта взаимодействий</h3></div>
+          <div class="legend"><span><i class="dot-online"></i> Онлайн</span><span><i class="dot-offline"></i> Офлайн</span><span><i class="legend-line"></i> Сообщения</span></div>
+        </div>
+        <div class="graph-frame" id="graph-frame">
+          <div class="graph-grid"></div>
+          <svg id="graph" viewBox="0 0 900 415" role="img" aria-label="Граф взаимодействий агентов"></svg>
+          <div id="graph-empty" class="graph-empty" hidden>
+            <span class="empty-glyph">◇</span>
+            <strong>Пока нет подключённых агентов</strong>
+            <span>После регистрации агент появится на карте.</span>
+          </div>
+        </div>
+        <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>
+      </article>
+      <article class="panel detail-panel">
+        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><span class="fine-badge">LIVE</span></div>
+        <div id="inspector" class="inspector-body"><div class="inspector-placeholder"><span>⌁</span><strong>Выберите агента</strong><p>Нажмите на узел сети, чтобы изучить его состояние и активность.</p></div></div>
+      </article>
+    </section>
+
+    <section class="operator-layout">
+      <article class="panel operator-panel">
+        <div class="panel-heading">
+          <div><div class="section-overline">DASHBOARD AGENT</div><h3>Ваш агент в сети</h3></div>
+          <label class="toggle" aria-label="Зарегистрировать дашборд как агента">
+            <input id="dashboard-toggle" type="checkbox">
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="operator-body">
+          <p class="operator-description">Включите переключатель, чтобы панель стала отдельным агентом с собственной очередью и появилась в пуле других агентов.</p>
+          <label class="form-label" for="dashboard-name">Имя агента</label>
+          <input id="dashboard-name" class="field" maxlength="64" spellcheck="false" placeholder="dashboard-operator">
+          <div class="operator-presence">
+            <span id="dashboard-presence" class="status-pill off">Выключен</span>
+            <span id="dashboard-agent-info" class="tiny-muted">Не зарегистрирован</span>
+          </div>
+          <div class="divider-line"></div>
+          <form id="dashboard-compose" class="composer" autocomplete="off">
+            <label class="form-label" for="dashboard-recipient">Получатель</label>
+            <select id="dashboard-recipient" class="field" required><option value="">Выберите агента</option></select>
+            <label class="form-label" for="dashboard-message">Сообщение</label>
+            <textarea id="dashboard-message" class="field textarea-message" maxlength="16000" placeholder="Отправить тестовое сообщение агенту…" required></textarea>
+            <div class="compose-footer">
+              <span id="dashboard-send-status" class="tiny-muted" role="status">Для отправки включите агента</span>
+              <button id="dashboard-send" type="submit" class="action-button" disabled>Отправить <span aria-hidden="true">↗</span></button>
+            </div>
+          </form>
+        </div>
+      </article>
+
+      <article class="panel inbox-panel">
+        <div class="panel-heading">
+          <div><div class="section-overline">INBOX / MESSAGE DELIVERY</div><h3>Входящие дашборда</h3></div>
+          <span class="counter" id="dashboard-inbox-count">0</span>
+        </div>
+        <div class="inbox-heading"><span>Агенты отправляют сюда обычные сообщения через MCP. Подтверждение удаляет их из очереди, но сохраняет запись в истории.</span></div>
+        <div id="dashboard-inbox" class="inbox-list">
+          <div class="list-empty">Включите агент дашборда, чтобы читать его очередь сообщений.</div>
+        </div>
+      </article>
+    </section>
+
+    <section class="bottom-layout">
+      <article class="panel">
+        <div class="panel-heading"><div><div class="section-overline">AGENT POOL</div><h3>Пул агентов</h3></div><span class="counter" id="agents-count">0</span></div>
+        <div class="table-scroll"><table><thead><tr><th>АГЕНТ</th><th>СТАТУС</th><th>ЗАДАЧА</th><th>ПОСЛЕДНЯЯ MCP-АКТИВНОСТЬ</th><th>ОЧЕРЕДЬ</th></tr></thead><tbody id="agents-body"><tr><td colspan="5" class="table-empty">Нет данных</td></tr></tbody></table></div>
+      </article>
+      <article class="panel">
+        <div class="panel-heading"><div><div class="section-overline">WAKE CHANNELS</div><h3>PUSH-адаптеры</h3></div><span class="counter" id="channels-count">0</span></div>
+        <div id="channels-list" class="stack"><div class="list-empty">Нет активных адаптеров. Прямое MCP-соединение продолжает работать.</div></div>
+      </article>
+    </section>
+
+    <section class="panel timeline-panel">
+      <div class="panel-heading"><div><div class="section-overline">MESSAGE ACTIVITY</div><h3>Последние сообщения</h3></div><span class="fine-note">Только метаданные — содержимое скрыто</span></div>
+      <div id="activity-list" class="timeline"><div class="list-empty">Сообщений пока нет.</div></div>
+      <div class="history-pager">
+        <span id="messages-total" class="tiny-muted">Сообщения за последние 24 часа · 10 на странице</span>
+        <div class="pager-controls">
+          <button id="messages-prev" class="pager-button" aria-label="Предыдущая страница сообщений" disabled>←</button>
+          <span id="messages-page">1 / 1</span>
+          <button id="messages-next" class="pager-button" aria-label="Следующая страница сообщений" disabled>→</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel audit-panel">
+      <div class="panel-heading">
+        <div><div class="section-overline">MCP TOOL TELEMETRY</div><h3>История вызовов инструментов</h3></div>
+        <div class="tool-latency"><span>СРЕДНЕЕ ВРЕМЯ</span><strong id="tool-avg">—</strong></div>
+      </div>
+      <p class="audit-note">Последние 100 MCP-вызовов · результат и время обработки на сервере. Аргументы, токены и текст сообщений не записываются.</p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>ИНСТРУМЕНТ</th><th>АГЕНТ</th><th>РЕЗУЛЬТАТ</th><th>ВРЕМЯ ОТВЕТА</th><th>КОГДА</th></tr></thead>
+          <tbody id="tools-body"><tr><td colspan="5" class="table-empty">Вызовов пока нет.</td></tr></tbody>
+        </table>
+      </div>
+      <div class="history-pager">
+        <span id="tools-total" class="tiny-muted">Не более 100 вызовов · 10 на странице</span>
+        <div class="pager-controls">
+          <button id="tools-prev" class="pager-button" aria-label="Предыдущая страница вызовов" disabled>←</button>
+          <span id="tools-page">1 / 1</span>
+          <button id="tools-next" class="pager-button" aria-label="Следующая страница вызовов" disabled>→</button>
+        </div>
+      </div>
+    </section>
+
+    <footer class="page-footer"><div><span class="footer-mark">◈</span> Agent Network <span class="muted">· native MCP, optional wake sidecars</span></div><span>Локальная панель · не публикуйте её без авторизации</span></footer>
+  </main>
+  <script src="/dashboard-assets/dashboard.js" defer></script>
+  <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
+</body>
+</html>

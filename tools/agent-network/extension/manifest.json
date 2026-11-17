@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Agent Network Wake",
+  "version": "0.1.0",
+  "description": "Attach a ChatGPT conversation to Agent Network and wake it when native MCP messages arrive.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "scripting",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Agent Network",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "minimum_chrome_version": "116",
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ]
+}
