@@ -19,7 +19,13 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
     set textContent(text){this._text=String(text);this.children=[];}
     get textContent(){return this._text+this.children.map(c=>c.textContent).join('');}
     append(...children){this.children.push(...children);}
-    replaceChildren(...children){this._text='';this.children=[...children];}
+    replaceChildren(...children){
+      const contains=(root,node)=>root===node || root.children.some(ch=>contains(ch,node));
+      if(document.activeElement && contains(this,document.activeElement))
+        document.activeElement=null; // Real browsers blur inputs removed from the DOM.
+      this._text='';this.children=[...children];
+    }
+    focus(){document.activeElement=this;}
     addEventListener(kind,callback){(this.listeners[kind]??=[]).push(callback);}
     setAttribute(name,value){this.attributes[name]=String(value);}
     insertBefore(element,before){
@@ -34,6 +40,7 @@ function harness({graphNetwork=null,savedTeams=null}={}) {
   const events=[];
   const get=id=>{if(!ids.has(id))ids.set(id,new El());return ids.get(id);};
   const document={
+    activeElement:null,
     getElementById:get,
     createElement:tag=>new El(tag),
     createElementNS:(_ns,tag)=>new El(tag),
@@ -111,6 +118,45 @@ test('Dashboard inspector assigns and removes team memberships via Basic-authent
   assert.ok(put.url.endsWith('/api/v1/dashboard/agents/A/teams'));
   assert.deepEqual(JSON.parse(put.options.body),{teams:['Dev']});
   assert.equal(put.options.headers['X-Agent-Network-Admin-Token'],undefined);
+});
+
+test('auto-refresh retains the exact focused input node, text and caret',async()=>{
+  const h=harness();await h.flush();
+  const input=h.find(h.get('inspector'),'team-editor-input');
+  input.focus();
+  input.value='Forest';
+  for(const fn of input.listeners.input)fn();
+  input.selectionStart=3;
+  h.document.dispatchEvent({type:'agent-network:refresh'});
+  await h.flush();
+  assert.equal(h.find(h.get('inspector'),'team-editor-input'),input);
+  assert.equal(h.document.activeElement,input);
+  assert.equal(input.value,'Forest');
+  assert.equal(input.selectionStart,3);
+  input.value='Forest Chopper';
+  for(const fn of input.listeners.input)fn();
+  h.document.dispatchEvent({type:'agent-network:refresh'});
+  await h.flush();
+  assert.equal(h.find(h.get('inspector'),'team-editor-input'),input);
+  assert.equal(h.document.activeElement,input);
+  assert.equal(input.value,'Forest Chopper');
+  assert.equal(h.find(h.get('inspector'),'team-editor-save').disabled,false);
+});
+
+test('adding a team with Enter preserves editor focus across subsequent polls',async()=>{
+  const h=harness();await h.flush();
+  const input=h.find(h.get('inspector'),'team-editor-input');
+  input.focus();
+  input.value='My New Team';
+  for(const fn of input.listeners.input)fn();
+  for(const fn of input.listeners.keydown)fn({key:'Enter',preventDefault(){}});
+  assert.equal(h.document.activeElement,input);
+  assert.equal(input.value,'');
+  assert.equal(h.find(h.get('inspector'),'team-editor-chips').children.length,2);
+  h.document.dispatchEvent({type:'agent-network:refresh'});
+  await h.flush();
+  assert.equal(h.document.activeElement,input);
+  assert.equal(h.find(h.get('inspector'),'team-editor-chips').children.length,2);
 });
 
 test('Dashboard unsaved team input survives automatic data refresh',async()=>{

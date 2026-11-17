@@ -37,9 +37,10 @@
 
   let snapshot = null;
   let selectedId = null;
-  // Keep the user's unsaved edits across live 5-second dashboard refreshes.
+  // Keep the user's unsaved edits across live 3-second dashboard refreshes.
   const teamDrafts=new Map();
   const teamName = value => String(value||'').trim().toLocaleLowerCase();
+  let inspectorView = null;
   // The team filter affects only the map. No selected teams means "all".
   // Persist the choice locally so periodic polling and page reloads retain it.
   const graphFilterStorageKey = 'agentNetwork.graph.selectedTeams';
@@ -288,6 +289,8 @@
     chatsButton.dataset.agentId = agent?.agent_id || '';
     if (!agent) {
       selectedId = null;
+      if (inspectorView === null) return;
+      inspectorView = null;
       el.replaceChildren();
       const empty = add(el, 'div', 'inspector-placeholder');
       add(empty, 'span', '', '⌁');
@@ -295,12 +298,7 @@
       add(empty, 'p', '', 'Нажмите на узел сети, чтобы увидеть его состояние.');
       return;
     }
-    el.replaceChildren();
-    const header = add(el, 'div', 'inspector-title');
-    add(header, 'span', 'inspector-avatar', '◈');
-    const body = add(header, 'div', '');
-    add(body, 'strong', '', agent.name);
-    add(body, 'span', '', agent.role || agent.kind);
+
     const connected = data.channels.filter(c => c.agent_id === agent.agent_id);
     const fields = [
       ['Состояние', agent.online ? 'Онлайн' : 'Офлайн'],
@@ -313,91 +311,139 @@
       ['Сообщений в очереди', fmt(agent.pending_messages)],
       ['Последнее пробуждение', relative(agent.last_wake_at)],
     ];
-    fields.forEach(([label, value]) => {
+    const original = (agent.teams||[]).map(t=>t.name);
+
+    // Preserve the inspector DOM (and its focused input, caret, open datalist,
+    // unsaved editor state) while the same agent is selected. Only update
+    // read-only status fields during periodic server refreshes.
+    if (inspectorView?.agentId === agent.agent_id) {
+      const view = inspectorView;
+      view.headerName.textContent = agent.name;
+      view.headerRole.textContent = agent.role || agent.kind;
+      fields.forEach(([, value], index) => {
+        view.fieldValues[index].textContent = value;
+        view.fieldValues[index].title = value;
+      });
+      view.taskValue.textContent = agent.current_task || agent.purpose || 'Нет активной задачи';
+      if (!view.draft.dirty && JSON.stringify(view.draft.names) !== JSON.stringify(original)) {
+        view.draft.names = [...original];
+        view.renderChips();
+      }
+      view.updateOptions(data.teams || []);
+      return;
+    }
+
+    // Agent selection changed: only now is it safe to rebuild the inspector.
+    inspectorView = null;
+    el.replaceChildren();
+    const header = add(el, 'div', 'inspector-title');
+    add(header, 'span', 'inspector-avatar', '◈');
+    const body = add(header, 'div', '');
+    const headerName = add(body, 'strong', '', agent.name);
+    const headerRole = add(body, 'span', '', agent.role || agent.kind);
+    const fieldValues = fields.map(([label, value]) => {
       const row = add(el, 'div', 'inspect-row');
       add(row, 'span', '', label);
       const strong = add(row, 'strong', '', value);
       strong.title = value;
+      return strong;
     });
-    // Admin-only editor. The browser's existing HTTP Basic session is sent
-    // same-origin; agent tokens and context are never needed.
-    const editor=add(el,'div','team-editor');
-    add(editor,'strong','team-editor-title','КОМАНДЫ АГЕНТА · ADMIN');
-    const original=(agent.teams||[]).map(t=>t.name);
-    if(!teamDrafts.has(agent.agent_id))
-      teamDrafts.set(agent.agent_id,{names:[...original],input:'',dirty:false});
-    const draft=teamDrafts.get(agent.agent_id);
-    if(!draft.dirty) draft.names=[...original];
-    const chips=add(editor,'div','team-editor-chips');
-    const refreshDraft=()=>inspector(data);
-    for(const name of draft.names) {
-      const chip=add(chips,'button','team-editor-chip',name+' ×');
-      chip.type='button';
-      chip.title='Убрать из команды';
-      chip.addEventListener('click',()=>{
-        draft.names=draft.names.filter(t=>teamName(t)!==teamName(name));
-        draft.dirty=true;
-        refreshDraft();
-      });
-    }
-    const controls=add(editor,'div','team-editor-controls');
-    const input=add(controls,'input','team-editor-input');
-    input.setAttribute('list','dashboard-team-list');
-    input.placeholder='Новая или существующая команда';
-    input.maxLength=64;
-    input.value=draft.input;
-    input.addEventListener('input',()=>{draft.input=input.value;draft.dirty=true;});
-    const options=add(editor,'datalist','');
-    options.id='dashboard-team-list';
-    for(const team of data.teams||[]) {
-      const option=add(options,'option','');
-      option.value=team.name;
-    }
-    const addButton=add(controls,'button','team-editor-button','+');
-    addButton.type='button';
-    const addTeam=()=>{
-      const entered=input.value.trim();
-      const known=(data.teams||[]).find(t=>teamName(t.name)===teamName(entered));
-      const name=known?.name||entered;
-      if(!name || name.length>64 || /[\x00-\x1f,]/.test(name) ||
-         draft.names.length>=12) return;
-      if(!draft.names.some(t=>teamName(t)===teamName(name))) draft.names.push(name);
-      draft.input='';
-      draft.dirty=true;
-      refreshDraft();
+
+    // The editor and input are created once per selected agent. Every click
+    // mutates just the chip container, not the input or its parent node.
+    const editor = add(el, 'div', 'team-editor');
+    add(editor, 'strong', 'team-editor-title', 'КОМАНДЫ АГЕНТА · ADMIN');
+    if (!teamDrafts.has(agent.agent_id))
+      teamDrafts.set(agent.agent_id, {names:[...original], input:'', dirty:false});
+    const draft = teamDrafts.get(agent.agent_id);
+    if (!draft.dirty) draft.names = [...original];
+    const chips = add(editor, 'div', 'team-editor-chips');
+    const controls = add(editor, 'div', 'team-editor-controls');
+    const input = add(controls, 'input', 'team-editor-input');
+    input.setAttribute('list', 'dashboard-team-list');
+    input.placeholder = 'Новая или существующая команда';
+    input.maxLength = 64;
+    input.value = draft.input;
+    input.addEventListener('input', () => { draft.input = input.value; draft.dirty = true; });
+    const options = add(editor, 'datalist', '');
+    options.id = 'dashboard-team-list';
+    let optionSignature = null;
+    const updateOptions = teams => {
+      const signature = JSON.stringify(teams.map(team => [team.team_id, team.name]));
+      if (signature === optionSignature) return;
+      optionSignature = signature;
+      options.replaceChildren();
+      for (const team of teams) {
+        const option = add(options, 'option', '');
+        option.value = team.name;
+      }
     };
-    addButton.addEventListener('click',addTeam);
-    input.addEventListener('keydown',event=>{
-      if(event.key==='Enter'){event.preventDefault();addTeam();}
+    const addButton = add(controls, 'button', 'team-editor-button', '+');
+    addButton.type = 'button';
+    const save = add(editor, 'button', 'team-editor-save', 'Сохранить команды');
+    save.type = 'button';
+    const notice = add(editor, 'div', 'team-editor-status', '');
+    const renderChips = () => {
+      chips.replaceChildren();
+      for (const name of draft.names) {
+        const chip = add(chips, 'button', 'team-editor-chip', name + ' ×');
+        chip.type = 'button';
+        chip.title = 'Убрать из команды';
+        chip.addEventListener('click', () => {
+          draft.names = draft.names.filter(t => teamName(t) !== teamName(name));
+          draft.dirty = true;
+          renderChips();
+        });
+      }
+      save.disabled = !draft.names.length;
+    };
+    const addTeam = () => {
+      const entered = input.value.trim();
+      const known = (snapshot?.teams || data.teams || [])
+        .find(t => teamName(t.name) === teamName(entered));
+      const name = known?.name || entered;
+      if (!name || name.length > 64 || /[\x00-\x1f,]/.test(name) ||
+          draft.names.length >= 12) return;
+      if (!draft.names.some(t => teamName(t) === teamName(name))) draft.names.push(name);
+      draft.input = '';
+      draft.dirty = true;
+      input.value = '';
+      renderChips();
+    };
+    addButton.addEventListener('click', addTeam);
+    input.addEventListener('keydown', event => {
+      if (event.key === 'Enter') { event.preventDefault(); addTeam(); }
     });
-    const save=add(editor,'button','team-editor-save','Сохранить команды');
-    save.type='button';
-    save.disabled=!draft.names.length;
-    const notice=add(editor,'div','team-editor-status','');
-    save.addEventListener('click',async()=>{
-      save.disabled=true;
-      notice.textContent='Сохраняю…';
+    save.addEventListener('click', async () => {
+      save.disabled = true;
+      notice.textContent = 'Сохраняю…';
       try {
-        const response=await fetch(
-          new URL('/api/v1/dashboard/agents/'+encodeURIComponent(agent.agent_id)+'/teams',
+        const response = await fetch(
+          new URL('/api/v1/dashboard/agents/' + encodeURIComponent(agent.agent_id) + '/teams',
                   location.origin).href, {
-            method:'PUT',cache:'no-store',credentials:'same-origin',
-            headers:{'Accept':'application/json','Content-Type':'application/json'},
+            method:'PUT', cache:'no-store', credentials:'same-origin',
+            headers:{'Accept':'application/json', 'Content-Type':'application/json'},
             body:JSON.stringify({teams:draft.names}),
           }
         );
-        const result=await response.json().catch(()=>({}));
-        if(!response.ok) throw Error(result.detail||'HTTP '+response.status);
-        teamDrafts.delete(agent.agent_id);
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw Error(result.detail || 'HTTP ' + response.status);
+        draft.names = (result.teams || []).map(t => t.name);
+        draft.dirty = false;
+        renderChips();
         document.dispatchEvent(new CustomEvent('agent-network:refresh'));
-      } catch(error) {
-        notice.textContent='Ошибка: '+String(error.message||error);
-        save.disabled=false;
+      } catch (error) {
+        notice.textContent = 'Ошибка: ' + String(error.message || error);
+        save.disabled = false;
       }
     });
+    renderChips();
+    updateOptions(data.teams || []);
     const task = add(el, 'div', 'inspect-task');
     add(task, 'span', '', 'ТЕКУЩАЯ ЗАДАЧА');
-    add(task, 'p', '', agent.current_task || agent.purpose || 'Нет активной задачи');
+    const taskValue = add(task, 'p', '', agent.current_task || agent.purpose || 'Нет активной задачи');
+    inspectorView = {agentId:agent.agent_id, headerName, headerRole, fieldValues,
+      taskValue, draft, renderChips, updateOptions};
   }
 
   function agentsTable(data) {
