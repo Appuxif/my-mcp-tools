@@ -128,7 +128,7 @@ class ApiTests(unittest.TestCase):
         b = self.register("target")
         self.app.state.store.send(a["agent"]["agent_id"], a["token"],
                                   "target", "PRIVATE MESSAGE BODY")
-        with self.client.websocket_connect("/api/v1/channels/ws") as ws:
+        with self.client.websocket_connect("/api/v1/channels/ws", headers={"Host":"127.0.0.1:8787"}) as ws:
             ws.send_json({
                 "type": "register", "kind": "chatgpt", "state": "idle",
                 "agent_id": b["agent"]["agent_id"], "token": b["token"],

@@ -174,7 +174,7 @@ class ConversationHttpTests(unittest.TestCase):
             ).status_code, 403)
             self.assertEqual(self.client.get(
                 url, headers={**self.headers,"Host":"evil.example"}
-            ).status_code, 401)
+            ).status_code, 400)
             response = self.client.get(url, headers=self.headers)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers["Cache-Control"], "no-store")

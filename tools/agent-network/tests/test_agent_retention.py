@@ -122,7 +122,7 @@ class AgentDeletionHttpTests(unittest.TestCase):
         ).status_code, 403)
         self.assertEqual(self.client.delete(
             url, headers={"Host": "remote.example", **self.admin_headers}
-        ).status_code, 401)
+        ).status_code, 400)
 
         self.assertEqual(self.client.delete(
             url, headers={"Authorization":"Basic invalid"}
@@ -184,7 +184,7 @@ class AgentDeletionHttpTests(unittest.TestCase):
         target=self.client.post("/api/v1/agents/register",json={
             "name":"ws-agent","role":"test","kind":"chatgpt",
         }).json()
-        with self.client.websocket_connect("/api/v1/channels/ws") as ws:
+        with self.client.websocket_connect("/api/v1/channels/ws", headers={"Host":"127.0.0.1:8787"}) as ws:
             ws.send_json({"type":"register","kind":"chatgpt","state":"idle",
                           "agent_id":target["agent"]["agent_id"],
                           "token":target["token"]})

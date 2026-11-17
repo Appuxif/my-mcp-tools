@@ -76,7 +76,7 @@ class DashboardBasicAuthTests(unittest.TestCase):
             self.assertEqual(res.status_code,401)
         self.assertEqual(self.client.get("/dashboard",headers={
             **self.headers, "Host":"evil.example"
-        }).status_code,401)
+        }).status_code,400)
         self.assertEqual(self.client.get("/dashboard",headers={
             **self.headers, "Origin":"https://evil.example"
         }).status_code,403)

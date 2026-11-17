@@ -3,7 +3,7 @@ name: agent-network
 description: "Coordinate ChatGPT, Codex CLI and other agents through the native agent-network MCP. Register/reconnect agents, discover peers, send/get/ack messages, update task status, interpret presence and configure optional wake adapters: Chrome extension for ChatGPT, local CLI sidecar for Codex, or MCP-only for other agents. Use when participating in a multi-agent network, delegating work, checking delivery, debugging presence or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -65,7 +65,7 @@ with 20-second heartbeats. Unknown state prevents unsafe wake; a separate
 `--state-file` can provide reliable activity for custom launchers, while
 `--assume-idle` is explicitly unsafe. This is **not an MCP proxy**.
 
-**Other local or remote agents:** they can use all seven MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
+**Other local or remote agents:** they can use all nine MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
 
 See [Wake channels and adapters](references/wake-channels.md) for setup details.
 

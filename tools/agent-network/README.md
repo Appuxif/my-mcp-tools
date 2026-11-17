@@ -68,6 +68,15 @@ endpoint via a properly authenticated private proxy/tunnel. The dashboard API
 contains agent/task metadata, so **do not publish it openly on the internet**.
 Remote HTTP access is not enabled or deployed by this project.
 
+The HTTP and WebSocket endpoints validate the HTTP **Host** header to prevent
+DNS-rebinding attacks against the loopback listener. By default only
+`127.0.0.1`, `localhost` and `::1` are allowed. If you intentionally serve
+Agent Network through a trusted local reverse proxy with a different hostname,
+configure `AGENT_NETWORK_TRUSTED_HOSTS=agents.example.com` (comma-separated
+literal hostnames, **not** URLs or wildcards) in the server environment.
+This does not grant remote admin access or replace authentication/TLS.
+Untrusted hosts receive HTTP 400 and cannot access registration endpoints.
+
 The MCP exposes `register_agent`, `list_agents`, `send_message`, `get_messages`, `ack_message`, `update_task`, `heartbeat`, `save_context`, and `read_context`. Agents receive a stable `agent_id` plus secret token upon registration and must supply them on later MCP calls. Store the token securely. `get_messages` is non-destructive; only `ack_message` acknowledges a message. Optional `client_message_id` deduplicates retries.
 
 A status such as `online` is a **heuristic** (recent MCP activity or connected sidecar), not proof that an LLM is currently processing a task.

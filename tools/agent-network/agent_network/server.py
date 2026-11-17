@@ -21,6 +21,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel
 
@@ -236,6 +237,15 @@ def create_app(config: Config | None = None) -> FastAPI:
         database=os.getenv("AGENT_NETWORK_DB", "data/agent-network.db"),
         inactive_seconds=float(os.getenv("AGENT_NETWORK_INACTIVE_SECONDS", "60")),
     )
+    # Loopback listeners are vulnerable to DNS rebinding without Host checks.
+    # Extra names support explicitly trusted private reverse proxies.
+    extra_hosts = tuple(
+        host.strip().lower()
+        for host in os.getenv("AGENT_NETWORK_TRUSTED_HOSTS", "").split(",")
+        if host.strip()
+    )
+    if any("*" in host or "/" in host for host in extra_hosts):
+        raise ValueError("AGENT_NETWORK_TRUSTED_HOSTS must contain literal hostnames")
     store = Store(config.database)
     broker = Broker(store, config)
     admin_token, admin_token_path = load_admin_token(
@@ -677,6 +687,12 @@ def create_app(config: Config | None = None) -> FastAPI:
     # MCP lives in the same process, sharing the same registry and inbox,
     # but no agent message travels through a sidecar adapter.
     app.mount("/", mcp_app)
+    # Add last so it runs before authentication/routes for both HTTP and WS.
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["127.0.0.1", "localhost", "::1", *extra_hosts],
+        www_redirect=False,
+    )
     return app
 
 
