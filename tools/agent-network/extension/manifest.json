@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Agent Network Wake",
-  "version": "0.1.0",
-  "description": "Attach a ChatGPT conversation to Agent Network and wake it when native MCP messages arrive.",
+  "version": "0.2.0",
+  "description": "Attach ChatGPT agents to Agent Network, wake idle chats and show a floating per-agent status HUD.",
   "permissions": [
     "storage",
     "tabs",
@@ -27,7 +27,9 @@
         "https://chatgpt.com/*"
       ],
       "js": [
-        "content.js"
+        "content.js",
+        "agent-status.js",
+        "agent-hud.js"
       ],
       "run_at": "document_idle"
     }
@@ -36,5 +38,15 @@
   "optional_host_permissions": [
     "https://*/*",
     "http://*/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "agent-hud.css"
+      ],
+      "matches": [
+        "https://chatgpt.com/*"
+      ]
+    }
   ]
 }

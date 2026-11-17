@@ -1,5 +1,5 @@
 /* MV3 wake adapter: only UI observations + wake signals; never proxies MCP calls. */
-importScripts('network-state.js');
+importScripts('network-state.js', 'agent-status.js');
 const traffic = new AgentNetworkTraffic.TrafficTracker();
 const completionFilter = { urls: ['https://chatgpt.com/backend-api/*'] };
 chrome.webRequest.onBeforeRequest.addListener(
@@ -50,6 +50,22 @@ async function setServer(tabId, raw) {
   return {server:url, changed:before!==url};
 }
 const connections = new Map(); // tabId -> { socket, interval }
+// Short-lived shared snapshots: status panels do not poll once per agent/tab.
+const dashboardCache = new Map();
+async function cachedDashboard(server) {
+  const current = dashboardCache.get(server);
+  if (current && Date.now() - current.at < 4000) return current.promise;
+  const promise = fetchJSON(server, '/api/v1/dashboard');
+  dashboardCache.set(server, {at:Date.now(), promise});
+  if (dashboardCache.size > 12) {
+    dashboardCache.delete(dashboardCache.keys().next().value);
+  }
+  try { return await promise; }
+  catch (error) {
+    if (dashboardCache.get(server)?.promise === promise) dashboardCache.delete(server);
+    throw error;
+  }
+}
 
 const chatUrl = url => /^https:\/\/chatgpt\.com\/(?:.*\/)?c\/[^/?#]+/.test(url || '');
 const storage = async () => (await chrome.storage.local.get('agentsByTab')).agentsByTab || {};
@@ -171,6 +187,49 @@ async function resumeAll() {
     try { await connect(Number(tabId), record); } catch { /* tab has gone away */ }
   }
 }
+async function hudStatus(sender) {
+  // Content scripts must not access another tab's agent metadata.
+  const tabId = sender?.tab?.id;
+  if (tabId == null || sender.frameId !== 0 ||
+      !chatUrl(sender.tab?.url)) return {visible:false};
+  const entries = await storage();
+  const record = entries[tabId];
+  if (!record || record.chatUrl !== sender.tab.url) return {visible:false};
+
+  const server = record.server || await serverForTab(tabId);
+  const connected = connections.get(Number(tabId))?.socket.readyState === WebSocket.OPEN;
+  const base = {
+    visible:true, name:record.name, active:!!record.active, connected:!!connected,
+    server, chatUrl:record.chatUrl, agentId:record.agentId
+  };
+  try {
+    const [snapshot, ui] = await Promise.all([
+      cachedDashboard(server),
+      record.active ? probe(tabId, record).catch(() => null) : Promise.resolve(null)
+    ]);
+    return {
+      ...base, updatedAt:Date.now(),
+      status:AgentNetworkStatus.summarize(snapshot, record.agentId),
+      ui:ui?.state || 'unknown', network:ui?.network || 'unknown',
+    };
+  } catch (error) {
+    return {...base, updatedAt:Date.now(), status:null,
+            ui:'unknown', network:'unknown',
+            error:String(error.message || error).slice(0, 180)};
+  }
+}
+
+async function hudOpenDashboard(sender) {
+  const tabId = sender?.tab?.id;
+  if (tabId == null || sender.frameId !== 0 || !chatUrl(sender.tab?.url))
+    throw Error('Only ChatGPT tab agents can open their own dashboard');
+  const record = (await storage())[tabId];
+  if (!record || record.chatUrl !== sender.tab.url)
+    throw Error('This conversation is not bound to an agent');
+  await chrome.tabs.create({url:(record.server || await serverForTab(tabId)) + '/dashboard'});
+  return {opened:true};
+}
+
 async function startAgent(tabId, profile) {
   const tab = await chrome.tabs.get(Number(tabId));
   if (!chatUrl(tab?.url)) throw Error('Open an existing ChatGPT conversation (not the homepage)');
@@ -264,6 +323,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           ui: entry ? await probe(tabId, entry) : null,
         };
       }
+      case 'network:hud-status': return hudStatus(sender);
+      case 'network:hud-open-dashboard': return hudOpenDashboard(sender);
       case 'network:start': return startAgent(message.tabId, message.profile);
       case 'network:stop': return stopAgent(message.tabId);
       case 'network:set-server': return setServer(message.tabId, message.server);

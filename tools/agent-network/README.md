@@ -186,6 +186,45 @@ and identity are not reused for a different server.
 The wake channel sends a WebSocket heartbeat every 20 seconds and only
 submits a prompt to a stable, empty, idle ChatGPT conversation.
 
+### Floating per-conversation HUD (Chrome extension v0.2)
+
+The extension now adds a **read-only floating status card** to each registered
+ChatGPT conversation. It appears automatically: there is no need to open the
+extension popup after an agent has been started. Chats without a registered
+agent remain unchanged. Each card shows only the metadata of the agent bound
+to **that tab**, including:
+
+- Current ChatGPT UI state, role, task, and whether the PUSH channel is linked.
+- Number of unread incoming messages and number of messages sent in the past
+  24 hours. If the server caps the graph at 100 distinct relationships, the
+  outgoing count is visibly marked as a **lower bound**.
+- Last outgoing recipient, last incoming sender, when each interaction
+  happened, and the delivery status of the latest outgoing message when
+  this is present in the server's short metadata history.
+- Last MCP activity, task status, and most recent wake attempt.
+
+The card refreshes about every **12 seconds while the tab is visible**. All
+agent tabs on the same server share a short-lived worker-side dashboard
+snapshot cache; the HUD neither polls native MCP nor sends or acknowledges
+messages. Only message **metadata** from the existing
+`GET /api/v1/dashboard` endpoint is used. The extension never injects
+credentials or message bodies into the page.
+
+You can **drag** the header, **collapse** to a compact header, or **hide**
+the card as a small ◈ icon. The icon still shows a pending-message badge,
+and clicking it restores the card. The layout preference is stored per agent
+in extension local storage. The **↗ Dashboard** button opens that agent's
+server dashboard.
+
+The UI is implemented as a closed **Shadow DOM** with scoped styling, without
+modifying ChatGPT's composer or message handlers. It disappears if the tab
+navigates to another conversation.
+
+**Deployment:** this is source-only until the Chrome extension is reloaded
+manually. **Do not reload the extension while agents are executing tasks**:
+the current live wake adapters can be interrupted. No Agent Network server
+restart is needed for this HUD; it uses APIs already present in v0.1.
+
 ### ChatGPT activity recognition: DOM + Network
 
 Observed through Chrome DevTools on 2026-11-17:
