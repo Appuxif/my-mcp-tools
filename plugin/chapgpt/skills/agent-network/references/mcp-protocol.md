@@ -2,7 +2,7 @@
 
 Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## Eight native MCP tools (not Dashboard HTTP endpoints)
+## Fourteen native MCP tools (not Dashboard HTTP endpoints)
 
 | Tool | Arguments | Result |
 |---|---|---|
@@ -14,6 +14,13 @@ Verified against `tools/agent-network/agent_network/server.py` and `store.py`. I
 | `heartbeat` | `agent_id`, `token` | `{"ok": true}`; updates MCP activity, not actual process or UI state. |
 | `save_context` | `agent_id`, `token`, `context` | Overwrites the caller's persistent compact summary (max 128 KiB UTF-8). `saved`, `updated_at`, `bytes`. Only on **explicit user request**. |
 | `read_context` | `agent_id`, `token` | Returns `exists`, `context`, `updated_at` for that agent only. On **user request or user-initiated migration**; not routine polling. |
+| `create_note` | `agent_id`, `token`, `title`, `description` | Create private draft: `note_id`, `status`, `expires_at`. No delivery. |
+| `add_to_note` | `agent_id`, `token`, `note_id`, `title`, `description` | Add a subnote to own draft: `note_id`, `subnote_id`. |
+| `update_subnote` | `agent_id`, `token`, `note_id`, `subnote_id`, `title`, `description` | Revise a subnote while draft. |
+| `remove_from_note` | `agent_id`, `token`, `note_id`, `subnote_id` | Remove a subnote while draft. |
+| `finalize_note` | `agent_id`, `token`, `note_id` | Freeze Note: `status=finalized`, `finalized_at`, `subnote_count`, `expires_at`. No delivery. |
+| `read_note` | `agent_id`, `token`, `note_id` | Read parent metadata, author, and ordered `subnotes`. Author sees drafts; shared-team agents only finalized Notes. |
+
 
 Schematic My MCP Tools invocation:
 
@@ -26,6 +33,37 @@ call_tool(server="agent-network", tool="get_messages",
 ```
 
 An agent connected directly to the native MCP calls `get_messages` without going through My MCP Tools or an extra adapter.
+
+## Notes — short-lived handoff (48 hours)
+
+Notes store a structured result without creating normal messages.
+A caller creates a parent draft via `create_note`, appends subnotes via
+`add_to_note`, optionally corrects them with `update_subnote` or removes
+them with `remove_from_note`, then seals the result with `finalize_note`.
+
+- **No automatic delivery.** None of the Note tools writes messages,
+  sends notifications, or triggers PUSH wake. To share a finalized Note,
+  the sender **must explicitly call `send_message` with the literal
+  `note_id` included in its TEXT**. A peer retrieves the ordinary message
+  with `get_messages`, extracts the ID, then calls `read_note` with their
+  **own** credentials.
+- Draft Notes are readable/editable only by their author. A finalized
+  Note is immutable and readable by agents currently sharing a team with
+  its author who know the ID. There is no note listing/discovery API.
+  `finalize_note` can safely be retried (idempotent).
+- TTL is **48 hours after original creation**, not after finalization.
+  All methods reject expired Notes immediately; scheduled maintenance
+  deletes parents and children on startup and approximately every 5 minutes.
+  Author deletion also deletes owned Notes and subnotes.
+- A Note is **not consumed on read**; agents usually read once for the
+  handoff, but may retry while it remains valid. The message containing
+  its ID is ACKed independently. Notes are not permanent documentation.
+- Limit: **100 subnotes** and **128 KiB UTF-8 title + description content**
+  per Note; titles 1–200 characters, descriptions at most 12,000 characters.
+  Do not include secrets or credentials in Note text.
+
+See [Code Review with Notes](code-review-with-notes.md) for the specialized
+reviewer/developer protocol. Generic Notes do not enforce task workflows.
 
 ## Administrative provisioning and identity continuity
 

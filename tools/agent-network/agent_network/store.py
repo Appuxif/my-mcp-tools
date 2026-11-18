@@ -12,6 +12,9 @@ from pathlib import Path
 
 
 MESSAGE_TTL_SECONDS = 24 * 60 * 60
+NOTE_TTL_SECONDS = 48 * 60 * 60
+MAX_NOTE_BYTES = 128 * 1024
+MAX_SUBNOTES = 100
 MAX_CONTEXT_BYTES = 128 * 1024
 
 
@@ -126,6 +129,27 @@ class Store:
                     context TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS notes(
+                    note_id TEXT PRIMARY KEY,
+                    author_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'draft'
+                        CHECK(status IN ('draft','finalized')),
+                    created_at REAL NOT NULL,
+                    finalized_at REAL
+                );
+                CREATE INDEX IF NOT EXISTS notes_expiration ON notes(created_at);
+                CREATE INDEX IF NOT EXISTS notes_author ON notes(author_id);
+                CREATE TABLE IF NOT EXISTS subnotes(
+                    subnote_id TEXT PRIMARY KEY,
+                    note_id TEXT NOT NULL REFERENCES notes(note_id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS subnotes_parent ON subnotes(note_id);
             """)
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.execute(
@@ -294,6 +318,15 @@ class Store:
             ).rowcount
             return {"expired_messages": removed}
 
+    def prune_notes(self, *, at: float | None = None) -> dict:
+        """Remove notes 48 hours after creation, regardless of draft/finalized."""
+        cutoff = (now() if at is None else at) - NOTE_TTL_SECONDS
+        with self.lock, self.db:
+            removed = self.db.execute(
+                "DELETE FROM notes WHERE created_at <= ?", (cutoff,)
+            ).rowcount
+            return {"expired_notes": removed}
+
     def delete_agent(self, agent_id: str) -> dict:
         """Delete one identity and its dependent queue/channel records atomically.
 
@@ -312,6 +345,12 @@ class Store:
             contexts = self.db.execute(
                 "DELETE FROM agent_contexts WHERE agent_id=?", (agent_id,)
             ).rowcount
+            # Foreign-key cascade removes this author's notes and subnotes.
+            # Count explicitly so the deletion report is useful to the admin.
+            notes = self.db.execute(
+                "SELECT count(*) FROM notes WHERE author_id=?", (agent_id,)
+            ).fetchone()[0]
+            self.db.execute("DELETE FROM notes WHERE author_id=?", (agent_id,))
             self.db.execute("DELETE FROM agent_teams WHERE agent_id=?", (agent_id,))
             # Keep aggregate tool telemetry but unlink it from deleted identities.
             self.db.execute("UPDATE tool_calls SET agent_id=NULL WHERE agent_id=?",
@@ -319,7 +358,8 @@ class Store:
             self.db.execute("DELETE FROM agents WHERE agent_id=?", (agent_id,))
             return {"agent_id": agent_id, "name": agent["name"],
                     "deleted_messages": messages, "deleted_channels": channels,
-                    "deleted_context": bool(contexts)}
+                    "deleted_context": bool(contexts),
+                    "deleted_notes": notes}
 
     def prune_channels(self, *, at: float | None = None) -> int:
         """Discard old disconnected wake-channel sessions (not registered agents)."""
@@ -909,6 +949,224 @@ class Store:
                     "UPDATE messages SET status='acknowledged', acknowledged_at=? WHERE message_id=?",
                     (now(), message_id))
             return {"message_id": message_id, "status": "acknowledged"}
+
+    # Notes are short-lived handoff resources, not messages. Neither creation
+    # nor finalization writes an inbox row or wakes an agent.
+    @staticmethod
+    def _note_fields(title: str, description: str) -> int:
+        if not isinstance(title, str) or not title.strip() or len(title) > 200:
+            raise ValueError("Note title must be 1..200 characters")
+        if not isinstance(description, str) or len(description) > 12000:
+            raise ValueError("Note description must be at most 12000 characters")
+        return len(title.encode("utf-8")) + len(description.encode("utf-8"))
+
+    def _note(self, note_id: str) -> sqlite3.Row:
+        row = self.db.execute(
+            "SELECT * FROM notes WHERE note_id=? AND created_at > ?",
+            (note_id, now() - NOTE_TTL_SECONDS),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Note not found")
+        return row
+
+    def _editable_note(self, agent_id: str, note_id: str) -> sqlite3.Row:
+        row = self._note(note_id)
+        if row["author_id"] != agent_id:
+            raise ValueError("Note not found")
+        if row["status"] != "draft":
+            raise ValueError("Note is finalized")
+        return row
+
+    def _note_usage(self, note: sqlite3.Row) -> tuple[int, int]:
+        parts = self.db.execute(
+            "SELECT count(*) AS total, "
+            "coalesce(sum(length(cast(title as blob)) + "
+            "length(cast(description as blob))), 0) AS used "
+            "FROM subnotes WHERE note_id=?", (note["note_id"],)
+        ).fetchone()
+        used = (len(note["title"].encode("utf-8")) +
+                len(note["description"].encode("utf-8")) + parts["used"])
+        return parts["total"], used
+
+    def create_note(self, agent_id: str, token: str, title: str,
+                    description: str) -> dict:
+        """Create a private draft; caller must separately send its ID."""
+        self.touch_mcp(agent_id, token)
+        size = self._note_fields(title, description)
+        if size > MAX_NOTE_BYTES:
+            raise ValueError("Note exceeds maximum size")
+        with self.lock, self.db:
+            stamp = now()
+            note_id = opaque_id()
+            self.db.execute(
+                "INSERT INTO notes(note_id,author_id,title,description,created_at)"
+                " VALUES(?,?,?,?,?)",
+                (note_id, agent_id, title, description, stamp),
+            )
+            return {"note_id": note_id, "status": "draft",
+                    "expires_at": stamp + NOTE_TTL_SECONDS}
+
+    def add_to_note(self, agent_id: str, token: str, note_id: str,
+                    title: str, description: str) -> dict:
+        self.touch_mcp(agent_id, token)
+        size = self._note_fields(title, description)
+        with self.lock, self.db:
+            note = self._editable_note(agent_id, note_id)
+            count, used = self._note_usage(note)
+            if count >= MAX_SUBNOTES:
+                raise ValueError("Note has reached its subnote limit")
+            if used + size > MAX_NOTE_BYTES:
+                raise ValueError("Note exceeds maximum size")
+            stamp = now()
+            subnote_id = opaque_id()
+            self.db.execute(
+                "INSERT INTO subnotes(subnote_id,note_id,title,description,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (subnote_id, note_id, title, description, stamp, stamp),
+            )
+            return {"note_id": note_id, "subnote_id": subnote_id}
+
+    def update_subnote(self, agent_id: str, token: str, note_id: str,
+                       subnote_id: str, title: str, description: str) -> dict:
+        self.touch_mcp(agent_id, token)
+        size = self._note_fields(title, description)
+        with self.lock, self.db:
+            note = self._editable_note(agent_id, note_id)
+            old = self.db.execute(
+                "SELECT * FROM subnotes WHERE note_id=? AND subnote_id=?",
+                (note_id, subnote_id),
+            ).fetchone()
+            if old is None:
+                raise ValueError("Subnote not found")
+            _, used = self._note_usage(note)
+            old_size = (len(old["title"].encode("utf-8")) +
+                        len(old["description"].encode("utf-8")))
+            if used - old_size + size > MAX_NOTE_BYTES:
+                raise ValueError("Note exceeds maximum size")
+            self.db.execute(
+                "UPDATE subnotes SET title=?,description=?,updated_at=? "
+                "WHERE note_id=? AND subnote_id=?",
+                (title, description, now(), note_id, subnote_id),
+            )
+            return {"note_id": note_id, "subnote_id": subnote_id,
+                    "updated": True}
+
+    def remove_from_note(self, agent_id: str, token: str, note_id: str,
+                         subnote_id: str) -> dict:
+        self.touch_mcp(agent_id, token)
+        with self.lock, self.db:
+            self._editable_note(agent_id, note_id)
+            removed = self.db.execute(
+                "DELETE FROM subnotes WHERE note_id=? AND subnote_id=?",
+                (note_id, subnote_id),
+            ).rowcount
+            if not removed:
+                raise ValueError("Subnote not found")
+            return {"note_id": note_id, "subnote_id": subnote_id,
+                    "removed": True}
+
+    def finalize_note(self, agent_id: str, token: str, note_id: str) -> dict:
+        """Lock the note permanently. Explicit send_message is still required."""
+        self.touch_mcp(agent_id, token)
+        with self.lock, self.db:
+            note = self._note(note_id)
+            if note["author_id"] != agent_id:
+                raise ValueError("Note not found")
+            if note["status"] == "draft":
+                stamp = now()
+                self.db.execute(
+                    "UPDATE notes SET status='finalized',finalized_at=? "
+                    "WHERE note_id=?", (stamp, note_id)
+                )
+            else:
+                stamp = note["finalized_at"]
+            count, _ = self._note_usage(note)
+            return {"note_id": note_id, "status": "finalized",
+                    "finalized_at": stamp,
+                    "subnote_count": count,
+                    "expires_at": note["created_at"] + NOTE_TTL_SECONDS}
+
+    def read_note(self, agent_id: str, token: str, note_id: str) -> dict:
+        """Read own draft or a finalized note by a currently shared-team peer."""
+        self.touch_mcp(agent_id, token)
+        with self.lock:
+            note = self._note(note_id)
+            author_id = note["author_id"]
+            if author_id != agent_id:
+                if note["status"] != "finalized" or not self._shared(agent_id, author_id):
+                    raise ValueError("Note not found")
+            author = self._agent(author_id)
+            children = self.db.execute(
+                "SELECT subnote_id,title,description,created_at,updated_at "
+                "FROM subnotes WHERE note_id=? ORDER BY rowid",
+                (note_id,),
+            ).fetchall()
+            return {
+                "note_id": note_id,
+                "author_id": author_id,
+                "author_name": author["name"],
+                "title": note["title"],
+                "description": note["description"],
+                "status": note["status"],
+                "created_at": note["created_at"],
+                "finalized_at": note["finalized_at"],
+                "expires_at": note["created_at"] + NOTE_TTL_SECONDS,
+                "subnotes": [dict(child) for child in children],
+            }
+
+    def admin_list_notes(self, *, page: int = 1, page_size: int = 20) -> dict:
+        """Read-only admin listing of live drafts and finalized Notes.
+
+        Keep description and subnotes out of this list: the administrator
+        loads the selected Note separately by ID.
+        """
+        if not 1 <= page <= 10000 or page_size != 20:
+            raise ValueError("Invalid Notes page")
+        with self.lock:
+            cutoff = now() - NOTE_TTL_SECONDS
+            total = self.db.execute(
+                "SELECT count(*) FROM notes WHERE created_at > ?", (cutoff,)
+            ).fetchone()[0]
+            rows = self.db.execute(
+                "SELECT n.note_id,n.title,n.author_id AS agent_id,n.created_at,"
+                "n.status,n.finalized_at, a.name AS agent_name,"
+                "count(s.subnote_id) AS subnote_count "
+                "FROM notes n JOIN agents a ON a.agent_id=n.author_id "
+                "LEFT JOIN subnotes s ON s.note_id=n.note_id "
+                "WHERE n.created_at > ? "
+                "GROUP BY n.note_id ORDER BY n.created_at DESC,n.rowid DESC "
+                "LIMIT ? OFFSET ?",
+                (cutoff, page_size, (page - 1) * page_size)
+            ).fetchall()
+            return {"items": [dict(row) for row in rows],
+                    "page": page, "page_size": page_size, "total": total}
+
+    def admin_read_note(self, note_id: str) -> dict:
+        """Read-only full Note for a Basic-authenticated administrator.
+
+        Unlike agent-scoped read_note, administrators may inspect drafts
+        and Notes from any team; this never touches agent presence.
+        """
+        with self.lock:
+            note = self._note(note_id)
+            author = self._agent(note["author_id"])
+            children = self.db.execute(
+                "SELECT subnote_id,title,description,created_at,updated_at "
+                "FROM subnotes WHERE note_id=? ORDER BY rowid",
+                (note_id,)
+            ).fetchall()
+            return {
+                "note_id": note_id,
+                "agent_id": note["author_id"],
+                "agent_name": author["name"],
+                "title": note["title"],
+                "description": note["description"],
+                "status": note["status"],
+                "created_at": note["created_at"],
+                "finalized_at": note["finalized_at"],
+                "expires_at": note["created_at"] + NOTE_TTL_SECONDS,
+                "subnotes": [dict(child) for child in children],
+            }
 
     def save_context(self, agent_id: str, token: str, context: str) -> dict:
         """Replace this agent's long-lived compact summary, never its credentials."""

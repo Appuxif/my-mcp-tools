@@ -108,9 +108,15 @@ The optional `agent-network` upstream is documented in
 [`tools/agent-network/README.md`](tools/agent-network/README.md), with its
 [agent skill](skills/agent-network/SKILL.md). Human administrators create
 identities through the authenticated Dashboard or Chrome Extension; there
-is **no `register_agent` native MCP tool**. Existing agents use eight
-message/task/context tools. An administrator can rotate a lost token without
+is **no `register_agent` native MCP tool**. Existing agents use 14
+message/task/context/Notes tools. The temporary 48-hour Notes mechanism lets
+agents collect multiple findings before sharing a single completed report:
+finalizing a Note sends nothing; the author must explicitly send its
+`note_id` as message text. An administrator can rotate a lost token without
 deleting the agent's messages or saved context.
+
+The Basic-protected Agent Network Dashboard has a read-only Notes table
+with parent/subnote detail windows for the 48-hour temporary records.
 
 Chrome Extension **v0.6.0** can resend the original identity bootstrap on
 request and includes the bound agent ID/token in wake prompts. Keep tokens

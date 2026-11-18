@@ -1,9 +1,9 @@
 ---
 name: agent-network
-description: "Coordinate ChatGPT, Codex CLI and other agents through eight native agent-network MCP tools: credential-scoped communication, team-scoped peer discovery and send/get/ack, task status, heartbeat, save_context/read_context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
+description: "Coordinate ChatGPT, Codex CLI and other agents through 14 native agent-network MCP tools: credential-scoped communication, team-scoped messaging, task status, 48-hour Notes for structured handoffs, and user-directed saved context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.6.0"
+  version: "1.7.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -27,7 +27,7 @@ metadata:
 4. Never share your token with other agents, include it in inter-agent messages, write it to logs or Git, or reveal it in your final response. Never guess IDs or tokens.
 5. Start with `get_messages`; use `list_agents` as needed to discover peers and inspect their roles, purposes, and status. After a **user-initiated migration to a new conversation**, call `read_context(agent_id, token)` to restore any previously saved summary. If the human invokes **Напомнить агенту контекст** in a migrated chat, the repeated migration bootstrap may request that summary again; never invent unsaved history.
 
-## Native MCP tool surface (8 tools)
+## Native MCP tool surface (14 tools)
 
 | Purpose | Tool |
 |---|---|
@@ -35,6 +35,7 @@ metadata:
 | Durable message queue / delivery | `send_message`, `get_messages`, `ack_message` |
 | Task status and presence | `update_task`, `heartbeat` |
 | User-directed durable compact summaries | `save_context`, `read_context` |
+| 48-hour structured Notes (no automatic delivery) | `create_note`, `add_to_note`, `update_subnote`, `remove_from_note`, `finalize_note`, `read_note` |
 
 **Agent creation is administrator-only; there is no `register_agent`
 MCP tool.** The Dashboard provides an ID/token at registration and can
@@ -53,6 +54,50 @@ saved context. For exact tool signatures see
 4. **When receiving:** `get_messages` returns unread messages **without consuming them**. After accepting or recording each message, call `ack_message(agent_id, token, message_id)`. ACK confirms **receipt, not task completion**.
 5. **When replying:** send a separate message to the original sender with `send_message` (preserve `task_id` when provided), then update `task_status` to reflect actual progress.
 6. **Before ending an active turn:** check the inbox once more. Never promise background processing after the response ends unless your environment has a working wake mechanism.
+
+## Notes — structured, temporary handoffs (48 hours)
+
+Use **Notes** for results with several related items: code review findings,
+test failures, research observations, checklists. A Note is **not a
+message**, inbox item, wake signal or long-term document. Every Note
+(including a draft) expires **48 hours after initial creation**, regardless
+of edits, reads or finalization.
+
+1. Call `create_note(agent_id, token, title, description)`. This creates a
+   **private draft**; save the returned `note_id`.
+2. Append findings with `add_to_note(agent_id, token, note_id, title,
+   description)` and save its `subnote_id`. Refine or remove items with
+   `update_subnote(agent_id, token, note_id, subnote_id, title, description)`
+   or `remove_from_note(agent_id, token, note_id, subnote_id)`. Inspect the
+   draft with `read_note`.
+3. **Collect and verify the whole result before sharing.** Call
+   `finalize_note(agent_id, token, note_id)` after completion. This freezes
+   the entire Note, including its subnotes.
+4. **Explicitly pass the actual literal `note_id` in the TEXT of a
+   separate `send_message` call to the intended agent.** For example:
+   `Review finished. Please read note_id=<actual-uuid>`.
+   **Creating, editing, reading or finalizing a Note NEVER generates an
+   inbox message, notification, PUSH wake or automatic delivery.** Without
+   an explicit message containing the ID, peers are not informed.
+5. The recipient extracts `note_id` from the ordinary message and calls
+   `read_note(their_agent_id, their_token, note_id)`. It returns the parent
+   and all ordered subnotes. Reading does not consume the Note, so retries
+   are possible during its 48-hour lifetime. ACK the **message** separately.
+
+A draft is visible/editable **only to its author**. A finalized Note is
+readable by other agents with its ID **only when they currently share
+a team with the author**. Finalized Notes cannot be edited. Notes have
+no listing/discovery API and no implicit recipient.
+
+Limits: up to **100 subnotes** per Note, **128 KiB** total UTF-8 text,
+titles 1–200 characters, descriptions at most 12,000 characters.
+Never place credentials or unrelated secrets in a Note.
+
+**Code Review:** follow the dedicated
+[Code Review with Notes](references/code-review-with-notes.md) guide.
+Do not send each finding to Developer as it is discovered; complete the
+review, finalize one Note, then send **one** handoff message containing
+its `note_id`.
 
 ## Team membership (read-only for agents)
 
@@ -127,7 +172,7 @@ with 20-second heartbeats. Unknown state prevents unsafe wake; a separate
 `--state-file` can provide reliable activity for custom launchers, while
 `--assume-idle` is explicitly unsafe. This is **not an MCP proxy**.
 
-**Other local or remote agents:** they can use all eight MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
+**Other local or remote agents:** they can use all 14 MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
 
 See [Wake channels and adapters](references/wake-channels.md) for setup details.
 

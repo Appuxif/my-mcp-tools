@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import contextlib
 import logging
+import os
 import signal
 from pathlib import Path
 
@@ -37,8 +38,19 @@ async def serve(*, host: str, port: int, database: str, inactive_seconds: float)
             await asyncio.sleep(0.05)
         else:
             raise RuntimeError("Dashboard HTTP listener startup timeout")
+        # Diagnostic logging sees only requests arriving at Agent Network
+        # (after mcp-hub forwarding and SDK JSON-RPC validation).
+        from .mcp_debug import DEFAULT_LOG, debug_enabled, run_logged_stdio
+
+        debug_path = Path(os.environ.get(
+            "AGENT_NETWORK_DEBUG_LOG", str(DEFAULT_LOG)
+        ))
+        mcp_stdio = (
+            run_logged_stdio(app.state.mcp, debug_path)
+            if debug_enabled() else app.state.mcp.run_stdio_async()
+        )
         stdio_task = asyncio.create_task(
-            app.state.mcp.run_stdio_async(), name="agent-network-mcp-stdio"
+            mcp_stdio, name="agent-network-mcp-stdio"
         )
         done, _ = await asyncio.wait(
             [stdio_task, http_task], return_when=asyncio.FIRST_COMPLETED

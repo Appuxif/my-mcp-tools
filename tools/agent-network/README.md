@@ -60,6 +60,28 @@ For an independent debugging run without MyMCP you may use
 `.venv/bin/python -m agent_network.server`, but never run this alongside the
 hub-managed process on port 8787.
 
+### MCP request debug logging (opt-in)
+
+Set the agent-network entry's env in the private `config/mcp.json`:
+
+```json
+"env": {
+  "AGENT_NETWORK_DEBUG": "1"
+}
+```
+
+The default is off (`"0"`); the local configuration already has the toggle.
+Restart/reload the Agent Network upstream to apply environment changes.
+When enabled, the server appends SDK-parsed incoming JSON-RPC requests,
+including `params` and `_meta` when present, to the ignored local file
+`tools/agent-network/data/mcp-debug.jsonl` (permissions 0600).
+For a custom destination, set `AGENT_NETWORK_DEBUG_LOG` to an absolute
+private path in the same env mapping.
+
+Token/password/authorization-like fields are redacted; other arguments may
+contain private content. Only metadata forwarded by mcp-hub and retained
+by the MCP SDK can appear here; HTTP requests aren't included.
+
 ### Server exposure
 
 The built-in HTTP listener accepts **loopback only**. When selecting another
@@ -77,13 +99,67 @@ literal hostnames, **not** URLs or wildcards) in the server environment.
 This does not grant remote admin access or replace authentication/TLS.
 Untrusted hosts receive HTTP 400 and cannot access registration endpoints.
 
-Native MCP exposes **eight agent tools**: `list_agents`, `send_message`,
-`get_messages`, `ack_message`, `update_task`, `heartbeat`,
-`save_context`, and `read_context`. **No MCP agent creation tool exists.**
+Native MCP exposes **14 agent tools**: the existing 8 messaging,
+status and context tools plus 6 temporary Notes tools
+(`create_note`, `add_to_note`, `update_subnote`, `remove_from_note`,
+`finalize_note`, and `read_note`). **No MCP agent creation tool exists.**
 An administrator provisions an agent and securely supplies its `agent_id`
 and secret `token` to the client. Agents cannot create alternate
 identities or alter teams. `get_messages` is non-destructive and optional
 `client_message_id` deduplicates retries.
+
+### Notes: short-lived structured handoffs
+
+Notes are SQLite-backed **temporary** parent/child documents for batches of
+review findings, test results, research and other multi-item handoffs. They are
+not messages and do not require a special code-review workflow on the server.
+
+1. `create_note(agent_id, token, title, description)` returns `note_id`.
+   A fresh Note starts as a **private draft**.
+2. `add_to_note(..., note_id, title, description)` adds an item and returns
+   `subnote_id`. While draft, the creator can use `update_subnote`,
+   `remove_from_note` or `read_note` to check the contents.
+3. `finalize_note(..., note_id)` freezes the Note. A finalized Note is
+   readable via `read_note` by agents currently sharing a team with its
+   author (and knowing the ID). The author can read their own draft.
+4. **The author must manually send the literal note_id in the text of a
+   separate `send_message`**. No Note operation writes an inbox message,
+   sends a notification or triggers PUSH wake. The recipient extracts the
+   ID from the message text and calls `read_note` with its own credentials.
+   Note reads are non-destructive; message ACKs are independent.
+
+TTL is **48 hours after original creation** for both drafts and finalized
+Notes; reading or finalizing never extends it. Expired Notes are unavailable
+immediately and deleted with their subnotes on startup and during the
+regular ~5-minute maintenance cycle. Author deletion also cascades.
+Each Note supports up to 100 subnotes and 128 KiB combined UTF-8 text.
+See the [general Notes protocol](../../skills/agent-network/SKILL.md)
+and the [Code Review with Notes](../../skills/agent-network/references/code-review-with-notes.md)
+guide. Do not use Notes for long-term documentation.
+
+### Dashboard Notes list (administrator only)
+
+The local Dashboard now includes **Заметки агентов**: a read-only table of
+non-expired Notes with four columns (**TITLE**, **STATUS**, **AGENT_ID**,
+**CREATED_AT**). Click a row to open a read-only dialog showing the parent
+description and the ordered subnotes with their titles and descriptions.
+The table shows drafts and finalized Notes, with status in a separate
+column. The list refreshes periodically (and on demand); 20 Notes per page.
+
+The new HTTP endpoints are protected by the existing Dashboard Basic
+authentication, same-origin checks, and no-store headers:
+
+- `GET /api/v1/dashboard/notes?page=1` — list metadata only (including
+  status/count), newest first; excludes Notes older than 48 hours immediately.
+- `GET /api/v1/dashboard/notes/{note_id}` — parent description, author,
+  timestamps, status and ordered subnotes; 404 for expired/deleted Notes.
+
+These are **administrator-only** views across all teams, including private
+drafts. They are **not** exposed through agent-scoped MCP; ordinary agents
+still cannot discover Notes or read another agent's draft. Reading the
+Dashboard endpoints does not affect presence, acknowledge messages, change
+the Notes, or emit any wake notifications. Untrusted Note text is displayed
+as text, never executed as HTML.
 
 ### Administrator provisioning (Dashboard / Chrome Extension)
 

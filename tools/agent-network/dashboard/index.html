@@ -144,6 +144,31 @@
       </article>
     </section>
 
+    <section class="panel notes-panel" aria-label="Временные записки агентов">
+      <div class="panel-heading">
+        <div><div class="section-overline">TEMPORARY NOTES · 48 HOURS</div><h3>Заметки агентов</h3></div>
+        <div class="notes-heading-actions">
+          <span class="counter" id="notes-count">0</span>
+          <button type="button" id="notes-refresh" class="chat-refresh" title="Обновить список Notes">Обновить ↻</button>
+        </div>
+      </div>
+      <p class="notes-help">Черновики и финализированные записки за последние 48 часов. Просмотр доступен только администратору.</p>
+      <div class="table-scroll">
+        <table class="notes-table">
+          <thead><tr><th>TITLE</th><th>STATUS</th><th>AGENT_ID</th><th>CREATED_AT</th></tr></thead>
+          <tbody id="notes-body"><tr><td colspan="4" class="table-empty">Загрузка заметок…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="history-pager">
+        <span id="notes-total" class="tiny-muted">Заметки · 20 на странице</span>
+        <div class="pager-controls">
+          <button type="button" id="notes-prev" class="pager-button" aria-label="Предыдущая страница заметок" disabled>←</button>
+          <span id="notes-page">1 / 1</span>
+          <button type="button" id="notes-next" class="pager-button" aria-label="Следующая страница заметок" disabled>→</button>
+        </div>
+      </div>
+    </section>
+
     <section class="panel timeline-panel">
       <div class="panel-heading"><div><div class="section-overline">MESSAGE ACTIVITY</div><h3>Последние сообщения</h3></div><span class="fine-note">Только метаданные — содержимое скрыто</span></div>
       <div id="activity-list" class="timeline"><div class="list-empty">Сообщений пока нет.</div></div>
@@ -286,6 +311,37 @@
     </aside>
   </div>
 
+  <div id="notes-overlay" class="notes-overlay" hidden>
+    <div id="notes-backdrop" class="notes-backdrop" aria-hidden="true"></div>
+    <section id="notes-dialog" class="notes-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="note-title" tabindex="-1">
+      <header class="notes-dialog-header">
+        <div class="notes-dialog-heading">
+          <div class="section-overline">NOTE DETAILS · ADMIN READ ONLY</div>
+          <h3 id="note-title">Заметка</h3>
+          <p id="note-meta" class="notes-dialog-meta">Загрузка…</p>
+        </div>
+        <button id="notes-close" class="chat-close" type="button"
+          aria-label="Закрыть заметку" title="Закрыть">×</button>
+      </header>
+      <div class="notes-dialog-toolbar">
+        <span id="notes-detail-status" role="status">Загрузка…</span>
+        <button id="notes-detail-refresh" class="chat-refresh" type="button">Обновить ↻</button>
+      </div>
+      <div id="notes-detail-scroll" class="notes-detail-scroll" tabindex="0">
+        <div class="notes-detail-section">
+          <h4>Описание</h4>
+          <div id="note-description" class="notes-text"></div>
+        </div>
+        <div class="notes-detail-section">
+          <h4>Дочерние заметки <span id="note-subnotes-count" class="counter">0</span></h4>
+          <div id="note-subnotes" class="note-subnotes"></div>
+        </div>
+      </div>
+      <footer class="notes-dialog-footer">Только чтение · финализация Note не отправляет сообщения · TTL 48 часов от создания</footer>
+    </section>
+  </div>
+
   <div id="context-overlay" class="context-overlay" hidden>
     <div id="context-backdrop" class="context-backdrop" aria-hidden="true"></div>
     <section id="context-dialog" class="context-dialog" role="dialog" aria-modal="true"
@@ -323,5 +379,6 @@
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
   <script src="/dashboard-assets/dashboard-markdown.js" defer></script>
   <script src="/dashboard-assets/dashboard-context.js" defer></script>
+  <script src="/dashboard-assets/dashboard-notes.js" defer></script>
 </body>
 </html>

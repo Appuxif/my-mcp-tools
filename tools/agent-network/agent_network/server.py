@@ -126,6 +126,7 @@ class Broker:
 
     def run_maintenance(self):
         self.store.prune_messages()
+        self.store.prune_notes()
         self.store.prune_channels()
         # Agent identities and compact context are deleted only by the admin.
         self.store.maintain_storage()
@@ -278,7 +279,11 @@ def create_app(config: Config | None = None) -> FastAPI:
             "Never create an alternate identity. list_agents is scoped to shared "
             "teams. Messages are delivered over native MCP. "
             "Use get_messages to read pending messages and ack_message only after "
-            "you have received them. Only on explicit user request, use save_context "
+            "you have received them. Notes are private drafts until explicitly "
+            "finalized; finalization never delivers a message or wakes an agent. "
+            "To share a finalized note, explicitly include note_id in the text of "
+            "a separate send_message. Notes expire 48 hours after creation. "
+            "Only on explicit user request, use save_context "
             "to store a compact summary. Use read_context on user request or after "
             "the user migrates this agent to a new chat; do not poll these tools. "
             "Agent identities and summaries persist until manual deletion. "
@@ -360,6 +365,50 @@ def create_app(config: Config | None = None) -> FastAPI:
         explicit user request or user-initiated migration to a new chat; do not
         poll or reread for each task/wake. Context is private to this agent."""
         return store.read_context(agent_id, token)
+
+    @mcp.tool()
+    @audit
+    def create_note(agent_id: str, token: str, title: str,
+                    description: str) -> dict:
+        """Create a private draft note (48h TTL). Does not notify other agents."""
+        return store.create_note(agent_id, token, title, description)
+
+    @mcp.tool()
+    @audit
+    def add_to_note(agent_id: str, token: str, note_id: str,
+                    title: str, description: str) -> dict:
+        """Add a titled subnote to your own draft. Returns subnote_id."""
+        return store.add_to_note(agent_id, token, note_id, title, description)
+
+    @mcp.tool()
+    @audit
+    def update_subnote(agent_id: str, token: str, note_id: str, subnote_id: str,
+                       title: str, description: str) -> dict:
+        """Revise a subnote in your draft before finalizing."""
+        return store.update_subnote(
+            agent_id, token, note_id, subnote_id, title, description
+        )
+
+    @mcp.tool()
+    @audit
+    def remove_from_note(agent_id: str, token: str, note_id: str,
+                         subnote_id: str) -> dict:
+        """Remove a subnote from your draft; finalized notes are immutable."""
+        return store.remove_from_note(agent_id, token, note_id, subnote_id)
+
+    @mcp.tool()
+    @audit
+    def finalize_note(agent_id: str, token: str, note_id: str) -> dict:
+        """Make note immutable/shareable; does NOT send or notify anyone.
+        To deliver it, explicitly send_message with note_id in text."""
+        return store.finalize_note(agent_id, token, note_id)
+
+    @mcp.tool()
+    @audit
+    def read_note(agent_id: str, token: str, note_id: str) -> dict:
+        """Read your draft or a finalized note of a shared-team agent by ID.
+        Reading does not consume a note; notes expire 48h after creation."""
+        return store.read_note(agent_id, token, note_id)
 
     @mcp.tool()
     @audit
@@ -646,6 +695,24 @@ def create_app(config: Config | None = None) -> FastAPI:
         except ValueError as exc:
             status = 404 if str(exc) == "Unknown agent_id" else 400
             raise HTTPException(status, str(exc)) from exc
+
+    @app.get("/api/v1/dashboard/notes")
+    def dashboard_notes(req: Request,
+                        page: int = Query(default=1, ge=1, le=10000)) -> JSONResponse:
+        """Administrator-only list of unexpired Notes (drafts included)."""
+        require_dashboard_admin(req)
+        return JSONResponse(store.admin_list_notes(page=page),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/dashboard/notes/{note_id}")
+    def dashboard_note(note_id: str, req: Request) -> JSONResponse:
+        """Administrator-only Note details, without consuming its contents."""
+        require_dashboard_admin(req)
+        try:
+            data = store.admin_read_note(note_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Note not found") from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/dashboard/agents/{target_agent_id}/context")
     def dashboard_agent_context(target_agent_id: str, req: Request) -> JSONResponse:

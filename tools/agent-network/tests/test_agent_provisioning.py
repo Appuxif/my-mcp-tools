@@ -128,7 +128,7 @@ class AgentProvisioningTests(unittest.TestCase):
         }).status_code,403)
         self.assertEqual(len(self.app.state.store.agents()),1)
 
-    def test_normal_mcp_exposes_eight_tools_and_rejects_registration(self):
+    def test_normal_mcp_exposes_fourteen_tools_and_rejects_registration(self):
         headers={"Accept":"application/json, text/event-stream",
                  "Content-Type":"application/json"}
         tools=self.client.post("/mcp",json={
@@ -139,6 +139,8 @@ class AgentProvisioningTests(unittest.TestCase):
         self.assertEqual(names,{
             "list_agents","send_message","get_messages","ack_message",
             "update_task","heartbeat","save_context","read_context",
+            "create_note","add_to_note","update_subnote",
+            "remove_from_note","finalize_note","read_note",
         })
         denied=self.client.post("/mcp",json={
             "jsonrpc":"2.0","id":2,"method":"tools/call",
