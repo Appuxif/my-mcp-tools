@@ -30,13 +30,18 @@ def debug_enabled() -> bool:
     return os.environ.get("AGENT_NETWORK_DEBUG", "").strip().lower() in _ENABLED
 
 
+def is_secret_field(key: Any) -> bool:
+    """Shared secret-field predicate for debug logs and persisted tool inputs."""
+    return isinstance(key, str) and bool(
+        _SECRET_KEY.search(key) or key.lower().endswith(("token", "secret"))
+    )
+
+
 def redact(data: Any) -> Any:
     """Retain arbitrary request metadata while removing credential field values."""
     if isinstance(data, dict):
         return {
-            key: "[REDACTED]" if isinstance(key, str) and (
-                _SECRET_KEY.search(key) or key.lower().endswith(("token", "secret"))
-            ) else redact(value)
+            key: "[REDACTED]" if is_secret_field(key) else redact(value)
             for key, value in data.items()
         }
     if isinstance(data, (list, tuple)):

@@ -412,3 +412,40 @@ body.notes-open{overflow:hidden}
   .notes-detail-scroll{padding:4px 15px 20px}
   .notes-table th,.notes-table td{padding:12px}
 }
+
+/* Read-only input details for the last 100 MCP calls. */
+.tool-call-row{cursor:pointer}
+.tool-call-row:focus-within{background:#17273a}
+.tool-call-link{display:block;padding:0;border:0;background:transparent;
+  color:#e2ebf7;font:600 12px system-ui;text-align:left;cursor:pointer}
+.tool-call-link:hover{color:var(--cyan)}
+.tool-call-link:focus-visible{outline:2px solid var(--cyan);outline-offset:4px;border-radius:3px}
+.tool-call-overlay{position:fixed;inset:0;z-index:10035;display:flex;align-items:center;
+  justify-content:center;padding:24px}
+.tool-call-overlay[hidden]{display:none}
+.tool-call-backdrop{position:absolute;inset:0;background:#020812e8;backdrop-filter:blur(5px)}
+.tool-call-dialog{position:relative;display:flex;flex-direction:column;width:100%;
+  max-width:1000px;min-width:0;height:min(86dvh,890px);min-height:250px;
+  background:#0d1b2b;border:1px solid #38586e;border-radius:15px;
+  overflow:hidden;box-shadow:0 24px 80px #000b}
+.tool-call-header{display:flex;justify-content:space-between;align-items:flex-start;
+  gap:16px;padding:20px 24px;border-bottom:1px solid var(--line)}
+.tool-call-heading{min-width:0}
+.tool-call-heading h3{font-size:21px;overflow-wrap:anywhere}
+.tool-call-meta{font-size:11px;color:var(--muted);margin:8px 0 0;overflow-wrap:anywhere}
+.tool-call-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:12px 24px;border-bottom:1px solid var(--line-soft);
+  color:#a8bed6;font-size:11px}
+.tool-call-scroll{min-height:0;flex:1;overflow:auto;padding:18px 24px;
+  background:#0a1522;overscroll-behavior:contain}
+.tool-call-arguments{margin:13px 0 0;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;
+  white-space:pre-wrap;overflow-wrap:anywhere;color:#e0ebf8;user-select:text}
+.tool-call-footer{padding:12px 24px;border-top:1px solid var(--line);
+  color:#8da0b5;font-size:10px}
+body.tool-call-open{overflow:hidden}
+@media(max-width:700px){
+  .tool-call-overlay{padding:0}
+  .tool-call-dialog{height:100dvh;max-height:none;border:0;border-radius:0}
+  .tool-call-header,.tool-call-toolbar{padding:15px}
+  .tool-call-scroll{padding:16px}
+}

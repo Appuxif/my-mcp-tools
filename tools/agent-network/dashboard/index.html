@@ -187,7 +187,7 @@
         <div><div class="section-overline">MCP TOOL TELEMETRY</div><h3>История вызовов инструментов</h3></div>
         <div class="tool-latency"><span>СРЕДНЕЕ ВРЕМЯ</span><strong id="tool-avg">—</strong></div>
       </div>
-      <p class="audit-note">Последние 100 MCP-вызовов · результат и время обработки на сервере. Аргументы, токены и текст сообщений не записываются.</p>
+      <p class="audit-note">Последние 100 MCP-вызовов · нажмите на строку, чтобы посмотреть аргументы. Секретные поля скрыты перед сохранением.</p>
       <div class="table-scroll">
         <table>
           <thead><tr><th>ИНСТРУМЕНТ</th><th>АГЕНТ</th><th>РЕЗУЛЬТАТ</th><th>ВРЕМЯ ОТВЕТА</th><th>КОГДА</th></tr></thead>
@@ -311,6 +311,34 @@
     </aside>
   </div>
 
+  <div id="tool-call-overlay" class="tool-call-overlay" hidden>
+    <div id="tool-call-backdrop" class="tool-call-backdrop" aria-hidden="true"></div>
+    <section id="tool-call-dialog" class="tool-call-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="tool-call-title" tabindex="-1">
+      <header class="tool-call-header">
+        <div class="tool-call-heading">
+          <div class="section-overline">MCP TOOL CALL · ADMIN READ ONLY</div>
+          <h3 id="tool-call-title">Вызов инструмента</h3>
+          <p id="tool-call-meta" class="tool-call-meta">Загрузка…</p>
+        </div>
+        <button id="tool-call-close" type="button" class="chat-close"
+          aria-label="Закрыть детали вызова">×</button>
+      </header>
+      <div class="tool-call-toolbar">
+        <span id="tool-call-status" role="status">Загрузка…</span>
+        <div class="context-tools">
+          <button id="tool-call-refresh" type="button" class="chat-refresh">Обновить ↻</button>
+          <button id="tool-call-copy" type="button" class="chat-refresh" disabled>Копировать JSON</button>
+        </div>
+      </div>
+      <div id="tool-call-scroll" class="tool-call-scroll" tabindex="0">
+        <div class="section-overline">INPUT ARGUMENTS</div>
+        <pre id="tool-call-arguments" class="tool-call-arguments"></pre>
+      </div>
+      <footer class="tool-call-footer">Только входные аргументы · секреты маскируются до сохранения · не более 100 вызовов в истории</footer>
+    </section>
+  </div>
+
   <div id="notes-overlay" class="notes-overlay" hidden>
     <div id="notes-backdrop" class="notes-backdrop" aria-hidden="true"></div>
     <section id="notes-dialog" class="notes-dialog" role="dialog" aria-modal="true"
@@ -376,6 +404,7 @@
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-registry.js" defer></script>
   <script src="/dashboard-assets/dashboard-interactions.js" defer></script>
+  <script src="/dashboard-assets/dashboard-tool-details.js" defer></script>
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
   <script src="/dashboard-assets/dashboard-markdown.js" defer></script>
   <script src="/dashboard-assets/dashboard-context.js" defer></script>

@@ -193,7 +193,7 @@ administrator deletion, even when no PUSH adapter is connected.
 
 **Message TTL:** **24 hours from creation** regardless of whether the message is `pending` or `acknowledged`. Cleanup runs on server startup and approximately every five minutes. Inbox reads exclude expired items immediately. This is not long-term storage or guaranteed delivery.
 
-Separately, the dashboard retains only the **latest 100 tool calls**, without arguments or secrets, with 10 entries per page. This audit limit does not affect message TTL.
+Separately, the Basic-authenticated Dashboard retains the **latest 100 tool calls**, with 10 entries per page. The table API returns metadata only; the admin-only `GET /api/v1/dashboard/tool-history/{call_id}` endpoint shows **redacted input arguments** (not results). Credential fields are masked before storage, but ordinary message text and Note descriptions are intentionally retained. Each argument JSON has a 256 KiB limit with truncation flag. Old calls recorded before this feature have no argument body. This audit limit does not affect message TTL.
 
 ## Dashboard debugging
 

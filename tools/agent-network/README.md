@@ -439,10 +439,17 @@ Do not expose this administrator-only feature through a public proxy.
 
 ### History and bounded persistence
 
-- **MCP tool calls:** 100 latest records in SQLite (`tool_calls`), every
-  successful or failed call. Each record contains tool name, agent ID, result,
-  timestamp and **server-side execution duration** in milliseconds. No tool
-  arguments, tokens, message bodies or stack traces are stored.
+- **MCP tool calls:** the most recent **100** successful/failed calls in
+  SQLite (`tool_calls`). Each record keeps the tool name, authenticated agent,
+  status, time, server-side execution duration and **input arguments**.
+  Credentials and recognized secret keys (including `token`) are redacted
+  **before storage**; a known call token repeated in message text is also
+  masked. Other text, including `send_message.text` and Notes descriptions,
+  is retained intentionally for debugging and may contain private data.
+  Audit access must remain administrator-only. Per-call argument JSON is
+  bounded at **256 KiB UTF-8** and marked as truncated when it exceeds
+  that size. Neither tool responses nor stack traces are stored.
+  Pre-upgrade historical records have no saved input arguments.
 - **Message history:** messages are kept for **24 hours from creation**,
   both `pending` and `acknowledged`. Old records are deleted on server
   startup and every 5 minutes, even if no new messages arrive. Inbox reads,
@@ -450,9 +457,14 @@ Do not expose this administrator-only feature through a public proxy.
   immediately. Message history has **no count limit**; the UI paginates all
   currently retained records 10 at a time. SQLite incremental auto-vacuum
   periodically reclaims free pages and truncates its WAL journal.
-- Endpoints: `GET /api/v1/dashboard/tool-history?page=1` and
-  `GET /api/v1/dashboard/message-history?page=1`. Tool calls have 10 pages
-  maximum; message pages depend on the number created in the past 24 hours.
+- Endpoints: `GET /api/v1/dashboard/tool-history?page=1` returns
+  only call metadata (10 calls per page, up to 10 pages);
+  `GET /api/v1/dashboard/tool-history/{call_id}` returns the selected
+  call's **redacted input arguments**. Both are protected by Dashboard
+  HTTP Basic login, same-origin policy and `no-store`. Click a row in the
+  **История вызовов инструментов** table to inspect the JSON or copy it.
+  `GET /api/v1/dashboard/message-history?page=1` lists message history,
+  with pages depending on the number created in the past 24 hours.
 - The tool duration measures the handler's execution on this server,
   **not** end-to-end network, model inference or client/UI latency.
 

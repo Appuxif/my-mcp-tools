@@ -251,7 +251,16 @@
     }
     data.items.forEach(call => {
       const tr=add(el,'tr','');
-      add(tr,'td','tool-name',call.tool_name);
+      tr.classList.add('tool-call-row');
+      const name=add(tr,'td','tool-name');
+      const button=add(name,'button','tool-call-link',call.tool_name);
+      button.type='button';
+      button.title='Показать аргументы вызова';
+      const show=() => document.dispatchEvent(new CustomEvent('agent-network:tool-call-detail', {
+        detail:{callId:call.id}
+      }));
+      button.addEventListener('click',event=>{event.stopPropagation();show();});
+      tr.addEventListener('click',show);
       add(tr,'td','tool-actor',call.agent_name || (call.agent_id ? call.agent_id.slice(0,8) : '—'));
       add(tr,'td',call.status==='ok'?'call-ok':'call-error',call.status==='ok'?'Успешно':'Ошибка');
       add(tr,'td','duration',Number(call.duration_ms).toFixed(2)+' мс');

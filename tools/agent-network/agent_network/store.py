@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
+
+from .mcp_debug import is_secret_field, redact
 
 
 
@@ -16,6 +19,7 @@ NOTE_TTL_SECONDS = 48 * 60 * 60
 MAX_NOTE_BYTES = 128 * 1024
 MAX_SUBNOTES = 100
 MAX_CONTEXT_BYTES = 128 * 1024
+MAX_TOOL_ARGUMENT_BYTES = 256 * 1024
 
 
 def now() -> float:
@@ -185,6 +189,15 @@ class Store:
                     created_at REAL NOT NULL
                 )
             """)
+            # Existing tool history rows were metadata-only. Keep them and
+            # migrate in place; legacy rows have NULL arguments_json.
+            columns = {r["name"] for r in self.db.execute("PRAGMA table_info(tool_calls)")}
+            if "arguments_json" not in columns:
+                self.db.execute("ALTER TABLE tool_calls ADD COLUMN arguments_json TEXT")
+            if "arguments_truncated" not in columns:
+                self.db.execute(
+                    "ALTER TABLE tool_calls ADD COLUMN arguments_truncated INTEGER NOT NULL DEFAULT 0"
+                )
         # Enable incremental compaction on new and existing file-backed DBs.
         # Existing databases need a one-time VACUUM to change auto_vacuum mode.
         if path != ":memory:":
@@ -505,20 +518,116 @@ class Store:
                 "recent": recent, "server": {"now": now()},
             }
 
+    @staticmethod
+    def _safe_tool_arguments(arguments: dict | None) -> tuple[str | None, int]:
+        """Serialize input arguments after masking secret fields, never raw tokens.
+
+        Text values can contain arbitrary private information: access is
+        administrator-only and intentionally supports debugging message bodies.
+        """
+        if arguments is None:
+            return None, 0
+        scrubbed = redact(arguments)
+        # Avoid echoing the same raw credential copied into an ordinary
+        # text argument in this call (e.g. send_message(text=agent_token)).
+        secrets: set[str] = set()
+
+        def extract_secret_strings(value):
+            if isinstance(value, str):
+                if len(value) >= 8:
+                    secrets.add(value)
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    extract_secret_strings(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    extract_secret_strings(nested)
+
+        def find_secret_fields(value):
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    if is_secret_field(key):
+                        extract_secret_strings(nested)
+                    else:
+                        find_secret_fields(nested)
+            elif isinstance(value, (list, tuple)):
+                for nested in value:
+                    find_secret_fields(nested)
+
+        find_secret_fields(arguments)
+
+        def mask_known(value):
+            if isinstance(value, str):
+                for secret in secrets:
+                    value = value.replace(secret, "[REDACTED]")
+            elif isinstance(value, dict):
+                return {k: mask_known(v) for k, v in value.items()}
+            elif isinstance(value, list):
+                return [mask_known(v) for v in value]
+            return value
+
+        body = json.dumps(mask_known(scrubbed), ensure_ascii=False, default=str)
+        if len(body.encode("utf-8")) <= MAX_TOOL_ARGUMENT_BYTES:
+            return body, 0
+        # Keep valid JSON for the detail endpoint and mark incompleteness.
+        # Slice UTF-8 safely without losing the redaction already performed.
+        original_bytes = len(body.encode("utf-8"))
+        # The preview is itself JSON-encoded; escape-heavy input can expand
+        # again. Binary-search a character prefix against the FINAL size.
+        lower, upper = 0, len(body)
+        while lower < upper:
+            length = (lower + upper + 1) // 2
+            candidate = json.dumps({
+                "_truncated": True,
+                "_original_bytes": original_bytes,
+                "_preview": body[:length],
+            }, ensure_ascii=False)
+            if len(candidate.encode("utf-8")) <= MAX_TOOL_ARGUMENT_BYTES:
+                lower = length
+            else:
+                upper = length - 1
+        limited = json.dumps({
+            "_truncated": True,
+            "_original_bytes": original_bytes,
+            "_preview": body[:lower],
+        }, ensure_ascii=False)
+        return limited, 1
+
     def record_tool_call(self, tool_name: str, status: str,
-                         duration_ms: float, agent_id: str = "") -> None:
-        """Keep only 100 safe MCP invocation summaries, no args or message bodies."""
+                         duration_ms: float, agent_id: str = "",
+                         arguments: dict | None = None) -> None:
+        """Keep 100 bounded MCP call records; input arguments are redacted."""
+        safe_args, truncated = self._safe_tool_arguments(arguments)
         with self.lock, self.db:
             self.db.execute(
-                "INSERT INTO tool_calls(tool_name, agent_id, status, duration_ms, created_at) "
-                "VALUES(?,?,?,?,?)",
+                "INSERT INTO tool_calls(tool_name, agent_id, status, duration_ms, "
+                "created_at, arguments_json, arguments_truncated) "
+                "VALUES(?,?,?,?,?,?,?)",
                 (tool_name[:100], agent_id[:128] or None, status[:30],
-                 round(max(0.0, duration_ms), 2), now())
+                 round(max(0.0, duration_ms), 2), now(), safe_args, truncated)
             )
             self.db.execute(
                 "DELETE FROM tool_calls WHERE id NOT IN "
                 "(SELECT id FROM tool_calls ORDER BY id DESC LIMIT 100)"
             )
+
+    def tool_call_detail(self, call_id: int) -> dict:
+        """Admin-only call details; list endpoints remain metadata-only."""
+        with self.lock:
+            row = self.db.execute(
+                "SELECT t.id,t.tool_name,t.agent_id,a.name AS agent_name,"
+                "t.status,t.duration_ms,t.created_at,"
+                "t.arguments_json,t.arguments_truncated "
+                "FROM tool_calls t LEFT JOIN agents a ON a.agent_id=t.agent_id "
+                "WHERE t.id=?", (call_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError("Tool call not found")
+            data = dict(row)
+            raw = data.pop("arguments_json")
+            data["arguments"] = json.loads(raw) if raw is not None else None
+            data["arguments_truncated"] = bool(data["arguments_truncated"])
+            return data
 
     def tool_history(self, page: int = 1, page_size: int = 10) -> dict:
         if not 1 <= page <= 10 or page_size != 10:

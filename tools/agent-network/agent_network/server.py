@@ -10,6 +10,7 @@ import base64
 import binascii
 import contextlib
 import functools
+import inspect
 import os
 import secrets
 import stat
@@ -293,7 +294,8 @@ def create_app(config: Config | None = None) -> FastAPI:
     )
 
     def audit(fn):
-        """Time MCP tools without storing input arguments, tokens or message bodies."""
+        """Record tool input with credential fields removed before SQLite storage."""
+        signature = inspect.signature(fn)
         @functools.wraps(fn)
         def logged(*args, **kwargs):
             started = time.perf_counter()
@@ -301,17 +303,24 @@ def create_app(config: Config | None = None) -> FastAPI:
             resolved_agent_id = ""
             try:
                 result = fn(*args, **kwargs)
-                # Tool calls are authenticated by the handler. Never record tokens.
-                resolved_agent_id = str(kwargs.get("agent_id") or "")
+                # An invalid credential must never attribute a call to its
+                # claimed agent_id; record only an authenticated identity.
+                resolved_agent_id = str(signature.bind(*args, **kwargs).arguments.get("agent_id") or "")
                 return result
             except Exception:
                 status = "error"
                 raise
             finally:
+                # Bind positional or keyword inputs, omitting omitted defaults.
+                try:
+                    arguments = dict(signature.bind_partial(*args, **kwargs).arguments)
+                except TypeError:
+                    arguments = {"_invalid_arguments": True}
                 store.record_tool_call(
                     fn.__name__, status,
                     (time.perf_counter() - started) * 1000,
-                    agent_id=resolved_agent_id
+                    agent_id=resolved_agent_id,
+                    arguments=arguments,
                 )
         return logged
 
@@ -579,6 +588,16 @@ def create_app(config: Config | None = None) -> FastAPI:
     def dashboard_message_history(page: int = Query(default=1, ge=1)) -> JSONResponse:
         return JSONResponse(store.message_history(page=page),
                             headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/dashboard/tool-history/{call_id}")
+    def dashboard_tool_call_detail(call_id: int, req: Request) -> JSONResponse:
+        """Basic-protected read-only MCP call arguments (credentials redacted)."""
+        require_dashboard_admin(req)
+        try:
+            data = store.tool_call_detail(call_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Tool call not found") from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     def require_dashboard_origin(req: Request):
         """Only same-origin dashboard documents may invoke browser-only write APIs."""
