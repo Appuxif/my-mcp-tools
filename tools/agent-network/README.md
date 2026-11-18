@@ -14,7 +14,7 @@
 | `agent_network/codex_adapter.py` | Optional independent process using `codex queue --thread ... --message ... --resume` |
 | `tests/` | Agent registry, inbox, WebSocket, MCP and network signal unit/integration tests |
 
-A remote agent without any wake adapter can still register and call MCP; its messages are retained until the agent next calls `get_messages`.
+An agent **provisioned by an administrator** can use native MCP without a wake adapter; messages remain queued until its next `get_messages` call or until the 24-hour TTL expires.
 
 ## Run from MyMCP (stdio, no daemon)
 
@@ -180,8 +180,9 @@ endpoints only accept loopback access; remote proxy hosts are not enough.
 Ordinary agents cannot access them with only their MCP tokens.
 
 Team isolation is for organizing **trusted agents**, not multi-tenant hostile
-users: anyone permitted to create an agent joins `default`. To isolate new
-agents, promptly move them to an appropriate team via an administrator.
+users. The Dashboard assigns initial teams **explicitly at creation**;
+admin-authorized Chrome Extension registration initially uses `default`.
+An ordinary MCP caller cannot create an identity or join a team.
 The Dashboard's optional sending identity is also an agent and must
 **already share a team** with the intended recipient. Dashboard sends do not
 change team membership automatically. If there is no common team, the server
@@ -250,8 +251,9 @@ To view the password locally on the server, run
 startup with file mode 0600. Do not share, log, commit or send it to agents.
 
 Signing in once authorizes **all dashboard actions**: live map, agent creation,
-agent pool, history, conversations with message bodies, saved-context reading,
-team assignments, deletion, and dashboard-agent controls. There are **no secondary password prompts** for Chats or Delete.
+agent ID copying, explicit token rotation, agent pool, history, conversations
+with message bodies, saved-context reading, team assignments, deletion,
+and dashboard-agent controls. There are **no secondary password prompts** for Chats or Delete.
 Browser HTTP Basic credentials are managed by the browser, not JavaScript or
 sessionStorage. Dashboard HTML, CSS/JS, API endpoints, tool/message history,
 health, API documentation, and the HTTP agent-list metadata require this login.
@@ -388,8 +390,11 @@ Do not expose this administrator-only feature through a public proxy.
    **Сервер** address is `http://127.0.0.1:8787`. To connect another server,
    enter its origin (HTTPS remotely; HTTP on private networks) and press
    **Применить**. Chrome may request permission to access that origin.
-4. Click **Панель состояния** to open that server's dashboard. Enter the
-   agent's name, role, purpose and description, then press **Старт**.
+4. For a **new agent**, enter the local server's `admin-token` under
+   **Команды · Управление администратором** and click **Авторизовать**,
+   then fill in name/role/purpose/description and press **Старт**.
+   Existing agents already bound to a chat reconnect without this step.
+   **Панель состояния** opens the separate HTTP Basic-authenticated Dashboard.
 5. The extension sends a bootstrap identity prompt to ChatGPT. Use
    **↻ Напомнить агенту контекст** in the popup to send that exact prompt
    again without changing the registration. The popup shows and can copy
@@ -423,7 +428,7 @@ the old token and identity are never reused on another server.
 The wake channel sends a WebSocket heartbeat every 20 seconds and only
 submits a prompt to a stable, empty, idle ChatGPT conversation.
 
-### Moving an existing agent to a fresh ChatGPT conversation (v0.5.0)
+### Moving an existing agent to a fresh ChatGPT conversation (extension v0.6.0)
 
 A crowded or inaccessible old ChatGPT conversation does **not** require a new
 Agent Network identity. The Chrome popup supports transferring an agent while
@@ -443,10 +448,13 @@ message history and task state**.
 4. Press **Подтвердить перенос**. The worker verifies the saved agent's
    token through the existing `/api/v1/agents/hud` endpoint. No new
    administrative API or server-side registration is required.
-5. The extension sends the original identity as a new bootstrap message
-   in the destination chat. For a blank page, it waits up to 30 seconds
-   for ChatGPT to assign the new conversation ID. Only then does the
-   extension move its local identity binding and transfer PUSH to the new tab.
+5. The extension sends a **migration bootstrap** with the same identity
+   and an instruction to call `read_context(agent_id, token)` to restore any
+   previously saved compact summary. For a blank page it waits up to 30
+   seconds for ChatGPT to assign the new conversation ID, then moves the
+   local identity binding and transfers PUSH. The destination remembers
+   the migration mode: **↻ Напомнить агенту контекст** later repeats this
+   migration-specific bootstrap, including the `read_context` instruction.
 
 The old conversation's binding is **removed**, not duplicated. If token
 validation or bootstrap submission fails, the old identity stays linked and
@@ -472,7 +480,7 @@ Start/Stop/server switching/migration are serialized in the worker, and
 all shared `agentsByChat` writes use a serialized read-modify-write path.
 This prevents lost registrations during concurrent Start operations.
 
-### Floating per-conversation HUD (Chrome extension v0.5.0)
+### Floating per-conversation HUD (Chrome extension v0.6.0)
 
 The floating status card is now **opt-in**. Pressing **Start** registers
 the agent and sends its bootstrap identity prompt, but **does not show**
@@ -566,7 +574,11 @@ Both network endpoint patterns and DOM selectors are **undocumented ChatGPT impl
 
 ## Codex CLI optional wake sidecar
 
-Start Codex normally, connect the **same** `agent-network` MCP upstream to Codex, and register the agent through its MCP tools. Then start a separate process alongside a local Codex thread:
+First **provision the Codex agent in Dashboard** and give Codex its
+existing `agent_id` and `token` (for example in a private `.agent.env`).
+Connect Codex to the **same** `agent-network` MCP upstream. There is no
+MCP registration tool. To enable optional PUSH wake, start a separate
+sidecar alongside an existing Codex thread.
 
 ```bash
 # Load your agent's secret into the environment or a chmod-600 file.

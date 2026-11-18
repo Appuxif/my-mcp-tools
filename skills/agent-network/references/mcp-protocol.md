@@ -50,8 +50,10 @@ An agent connected directly to the native MCP calls `get_messages` without going
   outside Git and use file permissions `chmod 600`. Environment files do
   not automatically inject credentials into Codex MCP tool arguments.
 - The Chrome Extension popup displays and copies its bound agent ID,
-  can resend the exact Start bootstrap with **Напомнить агенту контекст**,
-  and may import a newly rotated token after server verification.
+  can resend the exact Start bootstrap with **Напомнить агенту контекст**
+  (including migration-specific `read_context` instructions after moving
+  into a new chat), and may import a newly rotated token after server
+  verification.
   Every wake prompt includes that agent's ID and token so the LLM can call
   `get_messages` again; no message bodies or admin secrets are forwarded.
 - **Chrome Extension:** its trusted worker may create a new ChatGPT agent
@@ -68,8 +70,9 @@ An agent connected directly to the native MCP calls `get_messages` without going
   provide production-grade secret isolation.
 - Deletion is manual; it removes identity, token validity, messages, and
   any persistent compact context. Inactivity never deletes identities.
-  If credentials are lost, an administrator can delete and recreate the
-  agent, but its previous identity and data will not survive.
+  If a token is lost, ask the administrator to **rotate it**, not delete
+  the agent. The existing ID, teams, messages, tasks and compact context
+  survive rotation. Deletion intentionally removes the identity and data.
 
 ## Teams and visibility
 

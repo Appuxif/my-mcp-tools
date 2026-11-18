@@ -40,10 +40,11 @@ The ChatGPT tab adapter is installed as an unpacked extension from `tools/agent-
    persist in `chrome.storage.local` as `agentsByChat`; existing `agentsByTab`
    entries migrate automatically. The original bootstrap supplies the agent
    identity once; reopening the same chat in a new tab doesn't register or
-   bootstrap another agent. Only one tab owns its PUSH WebSocket at a time,
+   bootstrap another agent. The popup also shows/copies `agent_id` and can
+   explicitly repeat its original bootstrap without another registration. Only one tab owns its PUSH WebSocket at a time,
    and another tab can take over after the owner closes.
 4. The extension monitors the DOM (composer, Stop generating, text drafts, file/image attachments and uploading files) and the lifecycle of selected ChatGPT network requests. An application-level WebSocket heartbeat every ~20 seconds reports `idle`, `busy`, `draft`, or `unknown`.
-5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, attachment or upload, and the conversation URL has not changed. If the attachment region is absent, wake is blocked rather than risking a file upload. It sends a normal ChatGPT UI prompt such as "Check your Agent Network inbox through MCP." The model resumes and calls `get_messages` itself.
+5. When the server decides to wake the chat, the extension **rechecks** that the UI is idle, the composer has no draft, attachment or upload, and the conversation URL has not changed. If the attachment region is absent, wake is blocked rather than risking a file upload. The wake prompt includes the **bound agent's `agent_id` and `token`**, plus pending count and instructions to call `get_messages`, but **never** the admin-token or pending message bodies. Before sending, the extension verifies that the tab still belongs to that active agent and token.
 
 **Move an existing ChatGPT agent:** open a new chat (an empty
 `chatgpt.com/` page or a chat with a `/c/<id>` URL), select an existing
@@ -56,6 +57,15 @@ conversation text is **not** copied. Access to the original agent's token
 is required; a name alone cannot authorize migration. The previous ChatGPT
 thread retains its historical copy of the original token and could still
 call MCP if reactivated manually; moving PUSH is not token revocation.
+The new chat saves `bootstrapMigrated=true`: its **↻ Напомнить агенту контекст**
+button repeats the migration-specific bootstrap, including the
+`read_context` instruction.
+
+The popup shows/copies the bound `agent_id`. After Dashboard token
+rotation, paste the replacement token into the popup **Обновить токен**
+field. The extension validates it through the agent-scoped HUD API
+before updating the identity and reconnecting PUSH. The former token
+is invalid; token replacement is a popup-only human action.
 
 The floating HUD is **manual**, not automatic: pressing **Start** registers
 the agent but does not display an overlay. Open the extension popup in the
@@ -81,7 +91,7 @@ that the caller is a participant in every requested exchange; agents may
 included in general status metadata, and the viewer does not ACK messages.
 The conversation history still expires 24 hours after message creation.
 
-**MVP security limitation:** the agent token appears in the chat's bootstrap message. This is intended for a trusted local environment, not production-grade credential isolation.
+**MVP security limitation:** the agent token appears in the chat's bootstrap, reminder, and wake prompts. The admin-token never appears in those prompts. Treat ChatGPT conversation history as private; this is not production-grade credential isolation.
 
 ## Codex CLI: separate local sidecar
 

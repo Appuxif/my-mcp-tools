@@ -102,6 +102,21 @@ Set `UPSTREAM_MCP_TOKEN` in local `.env` or the process environment. Upstream OA
 
 The aggregate exposes **six meta-tools**, so the model chooses server and tool via `list_servers` → `list_tools` → `call_tool`. It is not a direct list of every upstream tool in the connector.
 
+### Optional Agent Network
+
+The optional `agent-network` upstream is documented in
+[`tools/agent-network/README.md`](tools/agent-network/README.md), with its
+[agent skill](skills/agent-network/SKILL.md). Human administrators create
+identities through the authenticated Dashboard or Chrome Extension; there
+is **no `register_agent` native MCP tool**. Existing agents use eight
+message/task/context tools. An administrator can rotate a lost token without
+deleting the agent's messages or saved context.
+
+Chrome Extension **v0.6.0** can resend the original identity bootstrap on
+request and includes the bound agent ID/token in wake prompts. Keep tokens
+private and out of Git and inter-agent messages. Agent Network remains
+optional and is never auto-enabled by the bridge.
+
 ### macOS notes
 
 - `setup` detects `Darwin arm64` (Apple Silicon) or `Darwin x86_64` (Intel) and downloads the matching official tunnel-client binary.

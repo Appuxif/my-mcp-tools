@@ -3,7 +3,7 @@ name: agent-network
 description: "Coordinate ChatGPT, Codex CLI and other agents through eight native agent-network MCP tools: credential-scoped communication, team-scoped peer discovery and send/get/ack, task status, heartbeat, save_context/read_context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.5.0"
+  version: "1.6.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -25,7 +25,7 @@ metadata:
    the client must still supply the credentials. The extension stores its
    agent credentials in extension-local storage. Keep the identity stable.
 4. Never share your token with other agents, include it in inter-agent messages, write it to logs or Git, or reveal it in your final response. Never guess IDs or tokens.
-5. Start with `get_messages`; use `list_agents` as needed to discover peers and inspect their roles, purposes, and status. After a **user-initiated migration to a new conversation**, also call `read_context(agent_id, token)` once to restore any previously saved summary.
+5. Start with `get_messages`; use `list_agents` as needed to discover peers and inspect their roles, purposes, and status. After a **user-initiated migration to a new conversation**, call `read_context(agent_id, token)` to restore any previously saved summary. If the human invokes **Напомнить агенту контекст** in a migrated chat, the repeated migration bootstrap may request that summary again; never invent unsaved history.
 
 ## Native MCP tool surface (8 tools)
 
@@ -60,7 +60,7 @@ saved context. For exact tool signatures see
   membership atomically on creation. Chrome Extension registrations start in
   `default`; existing agents were migrated into it once. Agents may belong
   to multiple teams, but **only an administrator** can assign or revoke them.
-- **Never attempt to create an identity or change teams through native MCP.****
+- **Never attempt to create an identity or change teams through native MCP.**
   No MCP team-mutation tool exists. `list_agents` includes your own `teams`
   and peers who share **at least one** team. Peers expose only the team names/IDs
   they share with you.
@@ -83,7 +83,7 @@ saved context. For exact tool signatures see
 ## Persistent work context (rare, user-directed tools)
 
 - `save_context(agent_id, token, context)`: **only when the user explicitly asks** to `/compact`, save, or refresh the agent's work context. Compose a useful self-contained summary (project, decisions, files, current progress, remaining work); replace the previous snapshot. Maximum **128 KiB UTF-8**. Do not store secrets. Never call this automatically after each answer/task or on a timer.
-- `read_context(agent_id, token)`: read your **own** summary **only on user request or after a user-initiated migration** to a new ChatGPT conversation. Returns `{exists, context, updated_at}`; if `exists=false`, do not invent missing history. Do not call on each wake, message, or routine task.
+- `read_context(agent_id, token)`: read your **own** summary **only on user request or after a user-initiated migration** to a new ChatGPT conversation (including a human-initiated migration-bootstrap reminder). Returns `{exists, context, updated_at}`; if `exists=false`, do not invent missing history. Do not call on each wake, message, or routine task.
 - Context belongs to the **agent identity**, not a chat or tab, and remains in SQLite until explicit admin deletion of that agent. Migration preserves `agent_id` and `token`, so the new chat can restore it through native MCP. Saved context is private to that agent, not inter-agent messaging.
 - A **human administrator** can also inspect saved summaries through the
   local, Basic-authenticated Dashboard: select an agent and click **Контекст**.
@@ -146,7 +146,9 @@ See [Wake channels and adapters](references/wake-channels.md) for setup details.
   admin-token.
 - A ChatGPT agent can use the popup **↻ Напомнить агенту контекст**
   to resend its original identity bootstrap, including agent ID and own
-  token (not admin-token), without changing identity or teams. Its wake
+  token (not admin-token), without changing identity or teams. For a chat
+  created by migration, it repeats the **migration** variant with an
+  instruction to call `read_context`. Its wake
   prompt also provides agent ID/token for `get_messages`; queued message
   bodies never travel in wake prompts. The popup displays/copies `agent_id`.
   After an admin token rotation, enter the new token in the popup's
