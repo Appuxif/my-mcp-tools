@@ -629,17 +629,69 @@ function existingCandidates(entries, server, excludeKey=null) {
     role:r.role,purpose:r.purpose,description:r.description,active:!!r.active
   })).sort((a,b)=>a.name.localeCompare(b.name));
 }
-async function availableAgents(tabId) {
+async function availableAgents(tabId, trustedPopup=false) {
   const {key,record}=await currentRecord(tabId);
   const server=await serverForTab(tabId,record);
-  return {
-    items:existingCandidates(await storage(),server,key),
-    canMigrate:!record,
-    server,
-  };
+  let entries=await storage();
+  let candidates=existingCandidates(entries,server,key);
+  if(trustedPopup && Object.values(entries).some(agent=>
+    agent?.agentId && (agent.server||DEFAULT_SERVER)===server)) {
+    // Only the popup may use the saved administrator token. Delete local
+    // registrations ONLY after an authenticated, authoritative DB snapshot.
+    let reconciled=false;
+    try {
+      const secret=await adminToken(server);
+      if(secret) {
+        const snapshot=await adminRequest(server,secret,'/api/v1/admin/agent-ids');
+        if(!Array.isArray(snapshot.agent_ids) ||
+           !snapshot.agent_ids.every(id=>typeof id==='string'))
+          throw Error('Invalid agent identity snapshot');
+        const live=new Set(snapshot.agent_ids);
+        await updateRecords(records=>{
+          for(const [chat,agent] of Object.entries(records)) {
+            if(agent?.agentId && (agent.server||DEFAULT_SERVER)===server &&
+               !live.has(agent.agentId)) {
+              const connection=connections.get(Number(agent.ownerTabId));
+              if(connection?.key===chat) disconnect(agent.ownerTabId);
+              delete records[chat];
+            }
+          }
+        });
+        entries=await storage();
+        candidates=existingCandidates(entries,server,key);
+        reconciled=true;
+      }
+    } catch(error) {
+      // An offline or outdated server must never cause destructive cleanup.
+      console.warn('Agent Network registry reconciliation:',String(error));
+    }
+    if(!reconciled) {
+      // Without admin access, hide credentials the server rejects, but keep
+      // those records locally: token rotation and deletion are indistinguishable.
+      const visible=await Promise.all(candidates.map(async agent=>{
+        const local=entries[agent.chatUrl];
+        try {
+          const response=await fetch(server+'/api/v1/agents/hud',{
+            method:'GET',cache:'no-store',signal:AbortSignal.timeout(8000),
+            headers:{'Accept':'application/json',
+                     'X-Agent-Id':local.agentId,'X-Agent-Token':local.token},
+          });
+          if(response.status===403) return false;
+          if(!response.ok) return true; // Don't hide agents on server errors.
+          const snapshot=await response.json();
+          return snapshot.agents?.some(a=>
+            a.agent_id===local.agentId && a.name===local.name)===true;
+        } catch { return true; } // Offline: preserve existing options.
+      }));
+      candidates=candidates.filter((_,i)=>visible[i]);
+    }
+  }
+  const removedCurrent=!!record && !entries[key];
+  return {items:candidates,canMigrate:!record || removedCurrent,
+          removedCurrent,server};
 }
 
-async function migrationPreview(tabId,name) {
+async function migrationPreview(tabId,name,agentId='') {
   const tab=await chrome.tabs.get(Number(tabId));
   const target=chatKey(tab?.url);
   if (!target && !newChatUrl(tab?.url))
@@ -648,7 +700,8 @@ async function migrationPreview(tabId,name) {
   if (target && entries[target])
     throw Error('В этом чате уже есть агент. Сначала открой новый чат без привязки.');
   const server=await serverForTab(tabId);
-  const candidates=existingCandidates(entries,server,target).filter(r=>r.name===name);
+  const candidates=existingCandidates(entries,server,target).filter(r=>
+    r.name===name && (!agentId || r.agentId===agentId));
   if(candidates.length!==1)
     throw Error('Агент не найден среди локально сохранённых регистраций этого сервера.');
   const source=candidates[0];
@@ -982,7 +1035,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!visible) throw Error('Не удалось показать панель в текущем чате.');
         return {visible:true};
       }
-      case 'network:available-agents': return availableAgents(message.tabId);
+      case 'network:available-agents':
+        return lifecycle(()=>availableAgents(message.tabId,!sender?.tab));
       case 'network:admin-status':
       case 'network:admin-connect':
       case 'network:admin-clear':
@@ -997,7 +1051,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         return adminSetTeams(message.tabId,message.teams);
       }
       case 'network:migration-preview':
-        return migrationPreview(message.tabId,message.name);
+        return migrationPreview(message.tabId,message.name,message.agentId);
       case 'network:migrate':
         return lifecycle(()=>migrateAgent(
           message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination

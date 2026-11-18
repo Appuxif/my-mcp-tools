@@ -15,7 +15,7 @@ function networkHarness({
   legacy=null,initial=null,urls=[PROJECT,PLAIN],
   newChatCreatesId=true,failMigrationSend=false,verifyFails=false,
   registrationDelay=0,sendDelay=0,socketStartsOpen=true,noAdmin=false,
-  rotatedToken=null,
+  rotatedToken=null,remoteAgentIds=null,registryFails=false,networkDown=false,
 }={}) {
   const data = {
     agentsByChat:initial || {},
@@ -107,6 +107,15 @@ function networkHarness({
   let created=0;
   const fetch=async (url,options)=>{
     events.push({kind:'http',url,method:options.method});
+    if(networkDown) throw Error('Server unreachable');
+    if(url.endsWith('/api/v1/admin/agent-ids')) {
+      if(registryFails) return {ok:false,status:503,async json(){return {detail:'Unavailable'}}};
+      if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
+        return {ok:false,status:403,async json(){return {detail:'Invalid admin token'}}};
+      const ids=remoteAgentIds || Object.values(data.agentsByChat)
+        .filter(a=>a?.agentId).map(a=>a.agentId);
+      return {ok:true,status:200,async json(){return {agent_ids:ids}}};
+    }
     if(url.endsWith('/api/v1/admin/teams') ||
        url.endsWith('/api/v1/admin/me/teams')) {
       if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
@@ -145,6 +154,7 @@ function networkHarness({
       if(verifyFails) return {ok:false,status:403,async json(){return {detail:'Invalid token'}}};
       const agent=Object.values(data.agentsByChat)
         .find(a=>a?.agentId===options.headers['X-Agent-Id'] &&
+                 (remoteAgentIds===null || remoteAgentIds.includes(a.agentId)) &&
                  (a?.token===options.headers['X-Agent-Token'] ||
                   (rotatedToken && rotatedToken===options.headers['X-Agent-Token'])));
       return {ok:!!agent,status:agent?200:403,async json(){
@@ -348,6 +358,86 @@ test('migration preview lists only locally owned identities and preserves their 
   assert.equal(preview.agentId,'uuid-identity-1');
   assert.equal(JSON.stringify(preview).includes('PRIVATE_AGENT_SECRET'),false);
   assert.equal((await h.request(11,'network:migration-preview',{name:'Somebody-Else'})).ok,false);
+});
+
+test('authoritative admin snapshot removes deleted agents from local Chrome storage',async()=>{
+  const stale='https://chatgpt.com/c/stale-agent';
+  const otherServer='https://chatgpt.com/c/other-server';
+  const base={name:'Chopper-Reviewer',role:'Reviewer',purpose:'Review',description:'',
+              token:'PRIVATE_AGENT_SECRET',active:false,server:'http://127.0.0.1:8787'};
+  const h=networkHarness({urls:[OTHER],remoteAgentIds:['live-reviewer'],initial:{
+    [PLAIN]:{...base,agentId:'deleted-reviewer',chatUrl:PLAIN},
+    [stale]:{...base,agentId:'live-reviewer',chatUrl:stale},
+    [otherServer]:{...base,agentId:'different-server',chatUrl:otherServer,
+                   server:'https://elsewhere.example'},
+  }});
+  const result=await h.popupRequest(10,'network:available-agents');
+  assert.equal(result.ok,true,result.error);
+  assert.deepEqual(Array.from(result.items.map(a=>a.agentId)),['live-reviewer']);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined,'deleted registration is purged');
+  assert.equal(h.data.agentsByChat[stale].agentId,'live-reviewer');
+  assert.equal(h.data.agentsByChat[otherServer].agentId,'different-server');
+  const preview=await h.popupRequest(10,'network:migration-preview',{
+    name:'Chopper-Reviewer',agentId:'live-reviewer'
+  });
+  assert.equal(preview.ok,true,preview.error);
+  assert.equal(preview.agentId,'live-reviewer');
+  assert.equal(preview.fromChatUrl,stale);
+});
+
+test('deletion of an agent bound to the current chat triggers popup status refresh',async()=>{
+  const h=networkHarness({urls:[PROJECT],remoteAgentIds:[],initial:{
+    [PLAIN]:{name:'Deleted',role:'Reviewer',agentId:'deleted-id',
+      token:'PRIVATE_AGENT_SECRET',chatUrl:PLAIN,server:'http://127.0.0.1:8787',
+      active:false},
+  }});
+  assert.equal((await h.popupRequest(10,'network:status')).entry.agentId,'deleted-id');
+  const result=await h.popupRequest(10,'network:available-agents');
+  assert.equal(result.removedCurrent,true);
+  assert.equal(result.canMigrate,true);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal((await h.popupRequest(10,'network:status')).entry,null);
+});
+
+test('without admin token, inaccessible agents are hidden but never deleted',async()=>{
+  const h=networkHarness({urls:[OTHER],noAdmin:true,remoteAgentIds:['live-reviewer'],initial:{
+    [PLAIN]:{name:'Reviewer',role:'R',agentId:'deleted-reviewer',token:'PRIVATE_AGENT_SECRET',
+             chatUrl:PLAIN,server:'http://127.0.0.1:8787'},
+    ['https://chatgpt.com/c/live']:{name:'Reviewer',role:'R',agentId:'live-reviewer',
+             token:'PRIVATE_AGENT_SECRET',chatUrl:'https://chatgpt.com/c/live',
+             server:'http://127.0.0.1:8787'},
+  }});
+  const response=await h.popupRequest(10,'network:available-agents');
+  assert.equal(response.ok,true);
+  assert.deepEqual(Array.from(response.items.map(a=>a.agentId)),['live-reviewer']);
+  assert.ok(h.data.agentsByChat[PLAIN],'invalid token may be rotated, preserve record');
+});
+
+test('offline registry reconciliation does not delete local identities',async()=>{
+  const h=networkHarness({urls:[OTHER],networkDown:true,initial:{
+    [PLAIN]:{name:'Reviewer',role:'R',agentId:'locally-saved',token:'TOKEN',
+             chatUrl:PLAIN,server:'http://127.0.0.1:8787'},
+  }});
+  const available=await h.popupRequest(10,'network:available-agents');
+  assert.equal(available.ok,true);
+  assert.equal(available.items[0].agentId,'locally-saved');
+  assert.ok(h.data.agentsByChat[PLAIN]);
+});
+
+test('migration preview targets exact ID when local names collide',async()=>{
+  const h=networkHarness({urls:[OTHER],initial:{
+    [PLAIN]:{name:'Reviewer',role:'R',agentId:'one',token:'PRIVATE_AGENT_SECRET',
+             chatUrl:PLAIN,server:'http://127.0.0.1:8787'},
+    ['https://chatgpt.com/c/second']:{name:'Reviewer',role:'R',agentId:'two',
+             token:'PRIVATE_AGENT_SECRET',chatUrl:'https://chatgpt.com/c/second',
+             server:'http://127.0.0.1:8787'},
+  }});
+  assert.equal((await h.popupRequest(10,'network:migration-preview',
+    {name:'Reviewer'})).ok,false,'ambiguous name must remain rejected');
+  const exact=await h.popupRequest(10,'network:migration-preview',
+    {name:'Reviewer',agentId:'two'});
+  assert.equal(exact.ok,true,exact.error);
+  assert.equal(exact.agentId,'two');
 });
 
 test('confirmed migration moves the SAME agent to a different existing conversation',async()=>{

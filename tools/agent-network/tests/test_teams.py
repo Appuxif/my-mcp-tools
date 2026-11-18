@@ -198,6 +198,23 @@ class TeamHttpSecurityTests(unittest.TestCase):
         self.assertEqual([t["name"] for t in self.app.state.store._teams(self.aid)], ["Dev"])
         self.assertEqual([t["name"] for t in self.app.state.store._teams(self.b["agent"]["agent_id"])],["default"])
 
+    def test_extension_agent_ids_are_admin_only_and_reflect_deletions(self):
+        endpoint = "/api/v1/admin/agent-ids"
+        self.assertEqual(self.client.get(endpoint).status_code, 403)
+        self.assertEqual(self.client.get(endpoint, headers=self.agent).status_code, 403)
+        self.assertEqual(self.client.get(endpoint, headers={
+            **self.ext, "Origin": "https://evil.example"
+        }).status_code, 403)
+        valid = self.client.get(endpoint, headers=self.ext)
+        self.assertEqual(valid.status_code, 200)
+        self.assertEqual(set(valid.json()["agent_ids"]), {
+            self.aid, self.b["agent"]["agent_id"]
+        })
+        self.assertNotIn("token", str(valid.json()).lower())
+        self.app.state.store.delete_agent(self.aid)
+        remaining = self.client.get(endpoint, headers=self.ext).json()
+        self.assertEqual(remaining["agent_ids"], [self.b["agent"]["agent_id"]])
+
     def test_mcp_no_teams_parameter_and_scoped_list(self):
         self.app.state.store.assign_teams(self.aid, ["Ops"])
         headers={"Accept":"application/json, text/event-stream","Content-Type":"application/json"}

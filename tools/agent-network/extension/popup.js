@@ -9,6 +9,10 @@ let selectedTeams=[];
 let availableTeams=[];
 const show = text => { $('status').textContent = text; };
 const nameKey = name => name.trim().toLocaleLowerCase();
+// Datalist values must be unique even if stale local records share a name.
+const agentOption = agent => knownAgents.filter(a=>a.name===agent.name).length>1
+  ? agent.name+' ['+agent.agentId+']' : agent.name;
+const chosenAgent = () => knownAgents.find(a=>agentOption(a)===$('name').value.trim());
 function renderTeamEditor() {
   const box=$('team-members');
   box.replaceChildren();
@@ -65,9 +69,9 @@ const cancelPreview = () => {
 function fillExisting() {
   if (ownAgent) return;
   cancelPreview();
-  const candidate=knownAgents.find(a=>a.name===$('name').value.trim());
+  const candidate=chosenAgent();
   if (candidate) {
-    for(const field of fields) $(field).value=candidate[field]||'';
+    for(const field of ['role','purpose','description']) $(field).value=candidate[field]||'';
     for(const field of ['role','purpose','description']) $(field).disabled=true;
     $('agent-source').textContent='Существующий агент · текущий чат: '+candidate.chatUrl+
       ' · Профиль сохранится без изменений.';
@@ -82,7 +86,7 @@ function updateOptions(items) {
   data.replaceChildren();
   for(const agent of knownAgents) {
     const option=document.createElement('option');
-    option.value=agent.name;
+    option.value=agentOption(agent);
     option.label=agent.role||agent.name;
     data.append(option);
   }
@@ -104,6 +108,7 @@ async function refresh() {
     $('agent-id').value = s.entry?.agentId || '';
     ownAgent=s.entry||null;
     const list=await request('network:available-agents');
+    if(list.removedCurrent) return refresh(); // DB deletion invalidated this chat's old binding.
     updateOptions(list.items);
     if (s.entry) {
       for (const field of fields) $(field).value = s.entry[field] || '';
@@ -257,10 +262,18 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('start').addEventListener('click', async () => {
     $('start').disabled = true;
     try {
+      const candidate=!ownAgent ? chosenAgent() : null;
       const profile = Object.fromEntries(fields.map(f => [f, $(f).value.trim()]));
+      if(candidate) profile.name=candidate.name;
       if (!profile.name || !profile.role) throw Error('Укажи имя и роль.');
-      if(!ownAgent && knownAgents.some(agent=>agent.name===profile.name)) {
-        const preview=await request('network:migration-preview',{name:profile.name});
+      if(!candidate && [...profile.name].length>64)
+        throw Error('Имя нового агента не должно превышать 64 символа.');
+      if(!candidate && knownAgents.some(agent=>agent.name===profile.name))
+        throw Error('Выбери агента с конкретным Agent ID из списка.');
+      if(candidate) {
+        const preview=await request('network:migration-preview',{
+          name:candidate.name,agentId:candidate.agentId,
+        });
         confirmedPreview=preview;
         $('migration-description').textContent=
           'Перенести '+preview.name+' из '+preview.fromChatUrl+

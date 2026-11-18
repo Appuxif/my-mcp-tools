@@ -5,13 +5,14 @@ const vm=require('node:vm');
 const path=require('node:path');
 
 const code=fs.readFileSync(path.join(__dirname,'../extension/popup.js'),'utf8');
+const html=fs.readFileSync(path.join(__dirname,'../extension/popup.html'),'utf8');
 const SOURCE='https://chatgpt.com/c/old-chat';
 const DEST='https://chatgpt.com/';
 const EXISTING={
   name:'Existing-Worker',role:'Developer',purpose:'Build apps',description:'3D + Python',
   agentId:'agent-uuid',chatUrl:SOURCE,active:true,
 };
-function createPopup({migrateFails=false,registered=false}={}) {
+function createPopup({migrateFails=false,registered=false,agents=[EXISTING],deletedBound=false}={}) {
   const elements=new Map();
   const el=id=>{
     if(!elements.has(id)){
@@ -46,7 +47,8 @@ function createPopup({migrateFails=false,registered=false}={}) {
           entry:current,connected:!!current,ui:{state:'idle',network:'idle'},
         };
         case 'network:available-agents':
-          return {ok:true,items:current?[]:[EXISTING]};
+          if(deletedBound && current) {current=null;return {ok:true,items:[],removedCurrent:true};}
+          return {ok:true,items:current?[]:agents};
         case 'network:admin-status':
           return {ok:true,configured:adminConfigured,
                   teams:[{name:'default'},{name:'Dev'},{name:'QA'}],
@@ -62,9 +64,12 @@ function createPopup({migrateFails=false,registered=false}={}) {
           if(!adminConfigured || !current) return {ok:false,error:'Denied'};
           currentTeams=msg.teams.map(name=>({team_id:name,name}));
           return {ok:true,agent:{agent_id:current.agentId,teams:currentTeams}};
-        case 'network:migration-preview':
-          return {ok:true,migrate:true,agentId:'agent-uuid',name:'Existing-Worker',
-            fromChatUrl:SOURCE,toChatUrl:DEST,needsNewChat:true};
+        case 'network:migration-preview': {
+          const agent=agents.find(a=>a.agentId===msg.agentId);
+          if(!agent) return {ok:false,error:'Agent not found'};
+          return {ok:true,migrate:true,agentId:agent.agentId,name:agent.name,
+            fromChatUrl:agent.chatUrl,toChatUrl:DEST,needsNewChat:true};
+        }
         case 'network:migrate':
           if(migrateFails)return {ok:false,error:'Failed validation'};
           current={...EXISTING,active:true,bootstrapDone:true};
@@ -141,6 +146,60 @@ test('Confirm transfers selected existing agent without creating a new one',asyn
   assert.equal(ui.el('name').disabled,true);
   assert.equal(ui.el('role').disabled,false);
   assert.match(ui.el('status').textContent,/перенесён/);
+});
+
+test('duplicate local names have distinct datalist values and migrate by agent ID',async()=>{
+  const stale={...EXISTING,agentId:'deleted-uuid',role:'Obsolete',
+               chatUrl:'https://chatgpt.com/c/deleted'};
+  const ui=createPopup({agents:[stale,EXISTING]});
+  await ui.ready();
+  const options=ui.el('known-agents').children.map(o=>o.value);
+  assert.equal(new Set(options).size,2);
+  assert.ok(options[1].includes('agent-uuid'));
+  ui.setName(options[1]);
+  assert.equal(ui.el('role').value,'Developer');
+  await ui.click('start');
+  const preview=ui.messages.find(m=>m.type==='network:migration-preview');
+  assert.equal(preview.agentId,'agent-uuid');
+  assert.equal(preview.name,'Existing-Worker');
+  assert.equal(ui.el('migration-confirm').hidden,false);
+});
+
+test('long duplicate agent name fits the input, but long NEW agent name is rejected',async()=>{
+  const name='R'.repeat(64);
+  const one={...EXISTING,name,agentId:'12345678-1234-1234-1234-123456789abc'};
+  const two={...EXISTING,name,agentId:'87654321-4321-4321-4321-cba987654321'};
+  const ui=createPopup({agents:[one,two]});
+  await ui.ready();
+  const values=ui.el('known-agents').children.map(option=>option.value);
+  const maxlength=Number(html.match(/id="name" maxlength="(\d+)"/)[1]);
+  assert.equal(values[0].length,103);
+  assert.ok(values.every(value=>value.length<=maxlength));
+  ui.setName(values[1]);
+  await ui.click('start');
+  const call=ui.messages.find(m=>m.type==='network:migration-preview');
+  assert.equal(call.agentId,two.agentId);
+  assert.equal(ui.el('migration-confirm').hidden,false);
+  ui.setName('Y'.repeat(65));
+  ui.el('role').value='Worker';
+  await ui.click('start');
+  assert.match(ui.el('status').textContent,/64 символа/);
+  assert.equal(ui.messages.some(m=>m.type==='network:start'),false);
+});
+
+test('surrogate-pair Unicode agent names remain selectable within input maxlength',async()=>{
+  const name='𐐀'.repeat(64); // Deseret letter: 64 Python code points, 128 JS code units.
+  const first={...EXISTING,name,agentId:'12345678-1234-1234-1234-123456789abc'};
+  const second={...EXISTING,name,agentId:'87654321-4321-4321-4321-cba987654321'};
+  const ui=createPopup({agents:[first,second]});
+  await ui.ready();
+  const options=ui.el('known-agents').children.map(o=>o.value);
+  const maxlength=Number(html.match(/id="name" maxlength="(\d+)"/)[1]);
+  assert.equal(options[0].length,167);
+  assert.ok(options.every(value=>value.length<=maxlength));
+  ui.setName(options[1]);
+  await ui.click('start');
+  assert.equal(ui.messages.find(m=>m.type==='network:migration-preview').agentId,second.agentId);
 });
 
 test('Cancel leaves existing agent untouched and hides confirmation',async()=>{
@@ -232,6 +291,14 @@ test('popup displays agent_id and offers safe reminder and rotated-token import'
     m.token==='UPDATED_PRIVATE_TOKEN'),true);
   assert.equal(ui.el('agent-token-new').value,'');
   assert.match(ui.el('status').textContent,/обновлён/);
+});
+
+test('popup resets binding after authoritative cleanup deletes current agent',async()=>{
+  const ui=createPopup({registered:true,deletedBound:true});
+  await ui.ready();
+  assert.equal(ui.el('name').disabled,false);
+  assert.equal(ui.el('agent-id-row').hidden,true);
+  assert.equal(ui.el('show-hud').disabled,true);
 });
 
 test('unbound popup hides agent ID and disables reminder',async()=>{

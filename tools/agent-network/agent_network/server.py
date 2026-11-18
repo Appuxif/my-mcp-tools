@@ -689,6 +689,18 @@ def create_app(config: Config | None = None) -> FastAPI:
         if not secret or not secrets.compare_digest(secret, admin_token):
             raise HTTPException(403, "Invalid administrator token")
 
+    @app.get("/api/v1/admin/agent-ids")
+    def extension_agent_ids(req: Request) -> JSONResponse:
+        """Authoritative identity IDs for cleaning stale extension registrations.
+
+        Restricted to the same local administrator access as team management.
+        Never exposes credentials or agent profiles.
+        """
+        require_extension_admin(req)
+        return JSONResponse({"agent_ids": [
+            agent["agent_id"] for agent in store.agents()
+        ]}, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/v1/admin/teams")
     def extension_team_list(req: Request) -> JSONResponse:
         require_extension_admin(req)
