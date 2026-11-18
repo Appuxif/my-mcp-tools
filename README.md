@@ -102,6 +102,28 @@ Set `UPSTREAM_MCP_TOKEN` in local `.env` or the process environment. Upstream OA
 
 The aggregate exposes **six meta-tools**, so the model chooses server and tool via `list_servers` → `list_tools` → `call_tool`. It is not a direct list of every upstream tool in the connector.
 
+### Optional PyCharm IDE MCP
+
+A JetBrains IDE may expose an **optional** `pycharm` MCP upstream through
+the hub, but the bridge never assumes PyCharm is installed, running,
+configured, or connected to the right project. Agents must discover it via
+`list_servers`, discover exposed tools via `list_tools` / `get_tool_schema`,
+and pass the correct `projectPath`. No PyCharm entry is automatically added
+to `config/mcp.json`.
+
+Use PyCharm only when IDE intelligence helps: `search_symbol`,
+`analyze_calls`, `get_symbol_info`, `get_file_problems`, `lint_files`,
+`rename_refactoring`, and existing Run Configurations. **Prefer Terminal**
+for Git/diffs/commits, `rg` and bulk searches, test suites, CI scripts,
+package installation, Docker, process management, large patches, remote
+repos and headless work. The IDE terminal may request extra confirmation;
+it is not the separate Terminal MCP. When PyCharm is unavailable,
+**fall back to Terminal without interrupting the task**.
+
+See the new [PyCharm Code Insight](skills/pycharm-code-insight/SKILL.md)
+and [PyCharm Refactor & Verify](skills/pycharm-refactor-verify/SKILL.md)
+skills and their references.
+
 ### Optional Agent Network
 
 The optional `agent-network` upstream is documented in

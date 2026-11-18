@@ -39,6 +39,21 @@ For long builds, prefer an asynchronous process plus status polling, not an unbo
 
 Use these tools as separate evidence sources. A background Blender export or Python test saying OK does not mean the browser renders the model correctly; perform target-runtime QA when required.
 
+## Optional PyCharm MCP (not a requirement)
+
+My MCP may expose a `pycharm` server only when enabled in the local
+configuration and when a JetBrains IDE is reachable. Discover it at runtime
+and verify the correct `projectPath`. For semantic analysis (`search_symbol`,
+`analyze_calls`, `get_symbol_info`) or safe renaming (`rename_refactoring`),
+PyCharm can be better than textual shell searches. For deterministic
+CLI tasks — Git, `rg`, tests, CI, installs, scripts, Docker and processes —
+**use the independent Terminal MCP even if PyCharm is online**. Its
+`execute_terminal_command` is the IDE terminal and may involve user
+confirmation; it is not a replacement for `terminal.run_command`.
+
+Refer to [PyCharm code navigation](../../pycharm-code-insight/SKILL.md)
+and [PyCharm refactor/validation](../../pycharm-refactor-verify/SKILL.md).
+
 ## Common failures
 
 - Wrong `cwd` → examine current path and rerun with explicit directory.

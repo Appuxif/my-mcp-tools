@@ -1,7 +1,7 @@
 {
   "name": "dev-6ae5df3555ac8191aae4fe2dfb908a81",
-  "version": "1.2.9",
-  "description": "Персональные MCP-инструменты для Ubuntu Desktop, Blender, Chrome DevTools, терминала и взаимодействия агентов через Agent Network.",
+  "version": "1.3.0",
+  "description": "Персональные MCP-инструменты для Ubuntu Desktop, Blender, Chrome DevTools, терминала, Agent Network и опционального PyCharm.",
   "author": {
     "name": "My MCP Tools"
   },
@@ -15,13 +15,17 @@
     "terminal",
     "development",
     "agent-network",
-    "multi-agent"
+    "multi-agent",
+    "pycharm",
+    "jetbrains",
+    "code-insight",
+    "refactoring"
   ],
   "apps": "./.app.json",
   "interface": {
     "displayName": "My MCP",
-    "shortDescription": "Ubuntu, Blender, Chrome и CLI",
-    "longDescription": "Подключает личные MCP-инструменты для управления Ubuntu, Blender, автоматизации Chrome через DevTools, терминальных команд и совместной работы нескольких агентов через Agent Network. Включает практические навыки по моделированию, работе с GUI, браузером, терминалом и обмену сообщениями между агентами с необязательными PUSH-адаптерами для ChatGPT и Codex CLI. Требует предварительно подключённого My MCP Tools.",
+    "shortDescription": "Ubuntu, Blender, Chrome, CLI и PyCharm",
+    "longDescription": "Подключает личные MCP-инструменты для управления Ubuntu, Blender, автоматизации Chrome через DevTools, терминальных команд и совместной работы нескольких агентов через Agent Network. Включает практические навыки по моделированию, работе с GUI, браузером, терминалом и обмену сообщениями между агентами с необязательными PUSH-адаптерами для ChatGPT и Codex CLI. Требует предварительно подключённого My MCP Tools. Опциональный PyCharm MCP используется для семантического анализа кода и рефакторинга при доступности IDE; при отсутствии агенты переходят на Terminal.",
     "developerName": "My MCP Tools",
     "category": "Developer Tools",
     "capabilities": [
@@ -29,12 +33,14 @@
       "Моделирование и анимация в Blender",
       "Автоматизация и отладка Chrome",
       "Работа с терминалом и файлами",
-      "Координация агентов и обмен сообщениями через MCP"
+      "Координация агентов и обмен сообщениями через MCP",
+      "Опциональный IDE-анализ и рефакторинг кода через PyCharm MCP"
     ],
     "defaultPrompt": [
       "Посмотри, какое приложение сейчас активно в Ubuntu, и помоги выполнить в нём задачу.",
       "Изучи текущую сцену Blender и предложи безопасный план моделирования или анимации.",
-      "Проверь открытую страницу Chrome через DevTools: DOM, консоль и ошибки загрузки."
+      "Проверь открытую страницу Chrome через DevTools: DOM, консоль и ошибки загрузки.",
+      "Проанализируй структуру и вызовы в проекте через PyCharm MCP, если он доступен; иначе используй Terminal."
     ]
   },
   "skills": "./skills/"
