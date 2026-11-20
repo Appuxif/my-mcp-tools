@@ -1,9 +1,9 @@
 ---
 name: agent-network
-description: "Coordinate ChatGPT, Codex CLI and other agents through 14 native agent-network MCP tools: credential-scoped communication, team-scoped messaging, task status, 48-hour Notes for structured handoffs, and user-directed saved context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
+description: "Coordinate ChatGPT, Codex CLI and other agents through 15 native agent-network MCP tools: credential-scoped communication, team-scoped messaging, task status, 48-hour Notes for structured handoffs, and user-directed saved context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.7.0"
+  version: "1.8.0"
 ---
 
 # Agent Network — inter-agent coordination
@@ -25,9 +25,9 @@ metadata:
    the client must still supply the credentials. The extension stores its
    agent credentials in extension-local storage. Keep the identity stable.
 4. Never share your token with other agents, include it in inter-agent messages, write it to logs or Git, or reveal it in your final response. Never guess IDs or tokens.
-5. Start with `get_messages`; use `list_agents` as needed to discover peers and inspect their roles, purposes, and status. After a **user-initiated migration to a new conversation**, call `read_context(agent_id, token)` to restore any previously saved summary. If the human invokes **Напомнить агенту контекст** in a migrated chat, the repeated migration bootstrap may request that summary again; never invent unsaved history.
+5. At initialization, call `read_instructions(agent_id, token)` once to load the admin-defined permanent prompt (may be empty). Check `get_messages` for pending work; use `list_agents` as needed to discover peers. After a **user-initiated migration to a new conversation**, call `read_context(agent_id, token)` to restore any previously saved summary. If the human invokes **Напомнить агенту контекст** in a migrated chat, the repeated migration bootstrap may request that summary again; never invent unsaved history.
 
-## Native MCP tool surface (14 tools)
+## Native MCP tool surface (15 tools)
 
 | Purpose | Tool |
 |---|---|
@@ -35,6 +35,7 @@ metadata:
 | Durable message queue / delivery | `send_message`, `get_messages`, `ack_message` |
 | Task status and presence | `update_task`, `heartbeat` |
 | User-directed durable compact summaries | `save_context`, `read_context` |
+| Permanent admin-managed agent prompt | `read_instructions` (read-only for its owner) |
 | 48-hour structured Notes (no automatic delivery) | `create_note`, `add_to_note`, `update_subnote`, `remove_from_note`, `finalize_note`, `read_note` |
 
 **Agent creation is administrator-only; there is no `register_agent`
@@ -54,6 +55,13 @@ saved context. For exact tool signatures see
 4. **When receiving:** `get_messages` returns unread messages **without consuming them**. After accepting or recording each message, call `ack_message(agent_id, token, message_id)`. ACK confirms **receipt, not task completion**.
 5. **When replying:** send a separate message to the original sender with `send_message` (preserve `task_id` when provided), then update `task_status` to reflect actual progress.
 6. **Before ending an active turn:** check the inbox once more. Never promise background processing after the response ends unless your environment has a working wake mechanism.
+
+## Persistent administrator instructions (not compact context)
+
+- `read_instructions(agent_id, token)` returns `{instructions, updated_at, bytes}` for **the authenticated agent only**. Empty instructions are valid for an existing agent and mean the administrator has not filled the prompt. An agent cannot edit its own instructions or another agent's prompt.
+- On every new ChatGPT conversation bootstrap, migration or manual **Напомнить агенту контекст**, the extension asks the agent to call `read_instructions` through native MCP. Read once when initializing or explicitly reminded; do not continuously poll.
+- The human administrator edits the field in Dashboard (**+ Создать агента → Инструкции / промпт** or **Инспектор → Инструкции**). The Dashboard GET/PUT endpoints are HTTP Basic protected. The field is stored separately in SQLite, up to **128 KiB UTF-8**, without expiration. Do not use it for secrets.
+- `save_context` / `read_context` are unchanged: they are controlled by the user and contain a compact work summary, **not** the administrator prompt. Reading instructions does not imply saving or reading context.
 
 ## Notes — structured, temporary handoffs (48 hours)
 
@@ -172,7 +180,7 @@ with 20-second heartbeats. Unknown state prevents unsafe wake; a separate
 `--state-file` can provide reliable activity for custom launchers, while
 `--assume-idle` is explicitly unsafe. This is **not an MCP proxy**.
 
-**Other local or remote agents:** they can use all 14 MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
+**Other local or remote agents:** they can use all 15 MCP tools **without any adapter**, but have **no PUSH or automatic wake**. They need a separate adapter compatible with their execution environment; there is no universal adapter yet.
 
 See [Wake channels and adapters](references/wake-channels.md) for setup details.
 

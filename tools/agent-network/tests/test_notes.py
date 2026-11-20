@@ -222,7 +222,7 @@ class NotesMcpTests(unittest.TestCase):
                     "clientInfo": {"name": "notes-test", "version": "1"},
                 }, 1)
                 schemas = rpc("tools/list", {}, 2)["tools"]
-                self.assertEqual(len(schemas), 14)
+                self.assertEqual(len(schemas), 15)
                 names = {tool["name"] for tool in schemas}
                 self.assertTrue({
                     "create_note", "add_to_note", "remove_from_note",

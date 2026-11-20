@@ -19,6 +19,7 @@ NOTE_TTL_SECONDS = 48 * 60 * 60
 MAX_NOTE_BYTES = 128 * 1024
 MAX_SUBNOTES = 100
 MAX_CONTEXT_BYTES = 128 * 1024
+MAX_INSTRUCTIONS_BYTES = 128 * 1024
 MAX_TOOL_ARGUMENT_BYTES = 256 * 1024
 
 
@@ -133,6 +134,12 @@ class Store:
                     context TEXT NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS agent_instructions(
+                    agent_id TEXT PRIMARY KEY REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    instructions TEXT NOT NULL DEFAULT '',
+                    updated_at REAL,
+                    revision INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS notes(
                     note_id TEXT PRIMARY KEY,
                     author_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
@@ -173,6 +180,20 @@ class Store:
                 self.db.execute(
                     "INSERT INTO migrations(name) VALUES('agent_teams_v1')"
                 )
+            # Upgrade early versions of the instructions table in place.
+            instruction_columns = {r["name"] for r in self.db.execute(
+                "PRAGMA table_info(agent_instructions)"
+            )}
+            if "revision" not in instruction_columns:
+                self.db.execute(
+                    "ALTER TABLE agent_instructions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0"
+                )
+            # Every pre-existing agent starts with empty administrator instructions.
+            # This does not modify the separately stored compact summaries.
+            self.db.execute(
+                "INSERT OR IGNORE INTO agent_instructions(agent_id,instructions,updated_at) "
+                "SELECT agent_id,'',NULL FROM agents"
+            )
             # Compatible migration for existing agent-network.db files.
             columns = {r["name"] for r in self.db.execute("PRAGMA table_info(agents)")}
             if "dashboard_enabled" not in columns:
@@ -358,6 +379,9 @@ class Store:
             contexts = self.db.execute(
                 "DELETE FROM agent_contexts WHERE agent_id=?", (agent_id,)
             ).rowcount
+            instructions = self.db.execute(
+                "DELETE FROM agent_instructions WHERE agent_id=?", (agent_id,)
+            ).rowcount
             # Foreign-key cascade removes this author's notes and subnotes.
             # Count explicitly so the deletion report is useful to the admin.
             notes = self.db.execute(
@@ -372,6 +396,7 @@ class Store:
             return {"agent_id": agent_id, "name": agent["name"],
                     "deleted_messages": messages, "deleted_channels": channels,
                     "deleted_context": bool(contexts),
+                    "deleted_instructions": bool(instructions),
                     "deleted_notes": notes}
 
     def prune_channels(self, *, at: float | None = None) -> int:
@@ -893,7 +918,7 @@ class Store:
 
     def register(self, name: str, role: str, kind: str, purpose: str = "",
                  description: str = "", agent_id: str = "", token: str = "",
-                 *, teams: list[str] | None = None) -> dict:
+                 *, teams: list[str] | None = None, instructions: str = "") -> dict:
         """Trusted internal registration. HTTP/MCP callers must authenticate first.
 
         Team assignment on creation is atomic; reconnect never changes teams.
@@ -908,11 +933,14 @@ class Store:
             raise ValueError("Invalid role or kind")
         if len(purpose) > 1000 or len(description) > 2000:
             raise ValueError("Profile field too long")
+        self._validate_instructions(instructions)
         with self.lock, self.db:
             existing = self.db.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
             if existing:
                 if teams is not None:
                     raise ValueError("Team assignment is not allowed on reconnect")
+                if instructions:
+                    raise ValueError("Instructions cannot be changed on reconnect")
                 if not agent_id or existing["agent_id"] != agent_id:
                     raise ValueError("Agent name already registered; use its id and token to reconnect")
                 self.verify(agent_id, token)
@@ -932,6 +960,11 @@ class Store:
                 (agent_id, name, kind, role, purpose, description, digest(secret), stamp, stamp, stamp)
             )
             self._set_teams(agent_id, names)
+            self.db.execute(
+                "INSERT INTO agent_instructions(agent_id,instructions,updated_at) "
+                "VALUES(?,?,?)",
+                (agent_id, instructions, stamp if instructions else None),
+            )
             return {"agent": self._public(self._agent(agent_id)), "token": secret, "created": True}
 
     def update_profile(self, agent_id: str, token: str, *, role: str = "",
@@ -1276,6 +1309,72 @@ class Store:
                 "expires_at": note["created_at"] + NOTE_TTL_SECONDS,
                 "subnotes": [dict(child) for child in children],
             }
+
+    @staticmethod
+    def _validate_instructions(instructions: str) -> int:
+        if not isinstance(instructions, str):
+            raise ValueError("Instructions must be text")
+        try:
+            size = len(instructions.encode("utf-8"))
+        except UnicodeError as exc:
+            raise ValueError("Instructions must be valid UTF-8 text") from exc
+        if size > MAX_INSTRUCTIONS_BYTES:
+            raise ValueError(f"Instructions exceed {MAX_INSTRUCTIONS_BYTES} bytes")
+        return size
+
+    def admin_read_instructions(self, agent_id: str) -> dict:
+        """Dashboard-only read; never affects agent activity or public profiles."""
+        with self.lock:
+            agent = self._agent(agent_id)
+            row = self.db.execute(
+                "SELECT instructions,updated_at,revision FROM agent_instructions WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            content = row["instructions"] if row else ""
+            return {"agent_id": agent_id, "agent_name": agent["name"],
+                    "instructions": content,
+                    "updated_at": row["updated_at"] if row else None,
+                    "revision": row["revision"] if row else 0,
+                    "bytes": len(content.encode("utf-8"))}
+
+    def admin_update_instructions(self, agent_id: str, instructions: str,
+                                  expected_revision: int) -> dict:
+        """Compare-and-swap: reject stale Dashboard tabs without losing prompts."""
+        size = self._validate_instructions(instructions)
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("Invalid instructions revision")
+        with self.lock, self.db:
+            agent = self._agent(agent_id)
+            stamp = now()
+            # A row is created at registration; this handles migrated or
+            # previously interrupted state without abandoning optimistic locking.
+            self.db.execute(
+                "INSERT OR IGNORE INTO agent_instructions(agent_id,instructions,updated_at) "
+                "VALUES(?, '', NULL)", (agent_id,),
+            )
+            updated = self.db.execute(
+                "UPDATE agent_instructions SET instructions=?,updated_at=?,revision=revision+1 "
+                "WHERE agent_id=? AND revision=?",
+                (instructions, stamp, agent_id, expected_revision),
+            ).rowcount
+            if updated != 1:
+                raise ValueError("Instructions revision conflict")
+            return {"agent_id": agent_id, "agent_name": agent["name"],
+                    "instructions": instructions, "updated_at": stamp,
+                    "revision": expected_revision + 1, "bytes": size}
+
+    def read_instructions(self, agent_id: str, token: str) -> dict:
+        """An agent can read its own instructions, but never change them."""
+        self.touch_mcp(agent_id, token)
+        with self.lock:
+            row = self.db.execute(
+                "SELECT instructions,updated_at FROM agent_instructions WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            content = row["instructions"] if row else ""
+            return {"instructions": content,
+                    "updated_at": row["updated_at"] if row else None,
+                    "bytes": len(content.encode("utf-8"))}
 
     def save_context(self, agent_id: str, token: str, context: str) -> dict:
         """Replace this agent's long-lived compact summary, never its credentials."""

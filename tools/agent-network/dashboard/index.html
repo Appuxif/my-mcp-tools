@@ -85,7 +85,7 @@
         <footer class="graph-footer"><div><span class="pulse"></span> <span id="graph-summary">Сбор состояния…</span></div><span>Стрелки — отправленные сообщения за 24 ч и ожидающие доставки</span></footer>
       </article>
       <article class="panel detail-panel">
-        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="open-agent-chat" class="chat-open-button" type="button" disabled hidden title="Просмотреть переписки агента">Чаты</button><button id="open-agent-context" class="chat-open-button" type="button" disabled hidden title="Прочитать сохранённый контекст агента">Контекст</button><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить агента, сохранённый контекст и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
+        <div class="panel-heading"><div><div class="section-overline">INSPECTOR</div><h3>Инспектор</h3></div><div class="inspector-actions"><button id="open-agent-chat" class="chat-open-button" type="button" disabled hidden title="Просмотреть переписки агента">Чаты</button><button id="open-agent-context" class="chat-open-button" type="button" disabled hidden title="Прочитать сохранённый контекст агента">Контекст</button><button id="open-agent-instructions" class="chat-open-button" type="button" disabled hidden title="Просмотреть и отредактировать инструкции агента">Инструкции</button><button id="delete-agent" class="delete-agent-button" type="button" disabled hidden title="Удалить агента, инструкции, сохранённый контекст и его сообщения">Удалить агента</button><span class="fine-badge">LIVE</span></div></div>
         <div id="inspector" class="inspector-body"><div class="inspector-placeholder"><span>⌁</span><strong>Выберите агента</strong><p>Нажмите на узел сети, чтобы изучить его состояние и активность.</p></div></div>
       </article>
     </section>
@@ -240,6 +240,9 @@
           <label for="registry-description">Описание</label>
           <textarea id="registry-description" class="field" name="description" maxlength="2000"
             placeholder="Возможности, специализация"></textarea>
+          <label for="registry-instructions">Инструкции / промпт</label>
+          <textarea id="registry-instructions" class="field registry-instructions" name="instructions"
+            placeholder="Постоянные инструкции агента (необязательно). Агент прочитает их через MCP read_instructions."></textarea>
           <label for="registry-team-name">Команды (1–12)</label>
           <div class="registry-team-selection">
             <div id="registry-team-chips" class="registry-team-chips"></div>
@@ -400,6 +403,35 @@
     </section>
   </div>
 
+  <div id="instructions-overlay" class="context-overlay" hidden>
+    <div id="instructions-backdrop" class="context-backdrop" aria-hidden="true"></div>
+    <section id="instructions-dialog" class="context-dialog" role="dialog" aria-modal="true"
+      aria-labelledby="instructions-title" tabindex="-1">
+      <header class="context-header">
+        <div class="context-heading">
+          <div class="section-overline">ADMIN · PERSISTENT AGENT PROMPT</div>
+          <h3 id="instructions-title">Инструкции агента</h3>
+          <p id="instructions-meta" class="context-meta">Инструкции хранятся отдельно от сохранённого контекста</p>
+        </div>
+        <button id="instructions-close" class="chat-close" type="button"
+          title="Закрыть редактор" aria-label="Закрыть редактор">×</button>
+      </header>
+      <div class="context-toolbar">
+        <span id="instructions-status" role="status">Загрузка…</span>
+        <div class="context-tools">
+          <span id="instructions-bytes">0 / 131072 байт</span>
+          <button id="instructions-refresh" class="chat-refresh" type="button">Обновить ↻</button>
+          <button id="instructions-copy" class="chat-refresh" type="button">Копировать черновик</button>
+          <button id="instructions-save" class="chat-refresh" type="button" disabled>Сохранить</button>
+        </div>
+      </div>
+      <textarea id="instructions-text" class="instructions-text" spellcheck="false"
+        aria-label="Базовые инструкции и промпт агента"
+        placeholder="Введите постоянные инструкции агента. Пустой текст допустим."></textarea>
+      <footer class="context-footer">Менять текст может только администратор · агент читает через MCP read_instructions · до 128 KiB UTF-8</footer>
+    </section>
+  </div>
+
   <script src="/dashboard-assets/graph-utils.js" defer></script>
   <script src="/dashboard-assets/dashboard.js" defer></script>
   <script src="/dashboard-assets/dashboard-registry.js" defer></script>
@@ -408,6 +440,7 @@
   <script src="/dashboard-assets/dashboard-conversations.js" defer></script>
   <script src="/dashboard-assets/dashboard-markdown.js" defer></script>
   <script src="/dashboard-assets/dashboard-context.js" defer></script>
+  <script src="/dashboard-assets/dashboard-instructions.js" defer></script>
   <script src="/dashboard-assets/dashboard-notes.js" defer></script>
 </body>
 </html>

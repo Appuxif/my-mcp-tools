@@ -308,6 +308,29 @@ There is no cross-agent MCP tool for this: `read_context` remains restricted
 to the requesting agent. Context data is intentionally omitted from the
 normal Dashboard snapshot and the extension HUD.
 
+**Permanent agent instructions:** during **+ Создать агента**, the admin can
+enter **Инструкции / промпт**, in addition to the ordinary role, purpose
+and description. The field is optional (existing agents are initialized with
+an empty string) and stores up to **128 KiB UTF-8** in a separate SQLite table.
+Select an existing agent and press **Инструкции** in the inspector to read,
+replace or clear the text. The editor warns before discarding unsaved changes
+(including page reload/tab close), tracks byte size and never mixes this data
+with compact context. Each editor reads an integer `revision`: Dashboard PUT
+requires `expected_revision` and rejects a stale copy with **409 Conflict**.
+The local draft stays intact; copy it before refreshing and merge any edits
+from another browser tab manually.
+
+Dashboard endpoints `GET/PUT /api/v1/dashboard/agents/{agent_id}/instructions`
+require HTTP Basic and same-origin protection. The agent has a **read-only**
+native MCP tool `read_instructions(agent_id, token)` that returns its own
+`{instructions, updated_at, bytes}`; other agents cannot read it through MCP,
+and there is no MCP tool to update instructions. The text is not included in
+public agent metadata, global snapshots or Chrome extension storage. On
+initial ChatGPT bootstrap and **Напомнить агенту контекст**, the extension asks
+that agent to call `read_instructions` once. The separate `save_context` and
+`read_context` workflow remains user-directed and independent of instructions.
+Admin instructions are plaintext on disk; do not put tokens or secrets there.
+
 Tables below show the agent pool, adapters and message events. No tokens
 are included in the ordinary Dashboard snapshot or tables. The explicit
 admin-only token rotation action returns a new secret once so it can be
@@ -369,7 +392,7 @@ trusted local operator, not a public multi-user application.
 ### Persistent agent identity, compact context, and manual deletion
 
 **Registered agents never expire from inactivity.** Agent names, identities,
-credentials and saved context remain in SQLite across restarts and chat
+credentials, administrator instructions and saved context remain in SQLite across restarts and chat
 migrations. There is **no automatic agent deletion**, even without an active
 PUSH channel or recent MCP traffic. Background maintenance still removes
 **messages** after their separate 24-hour TTL, prunes disconnected channel
@@ -398,7 +421,7 @@ or transfers the summary itself. Migrating without a saved summary returns
 To remove an agent manually, select it in the graph or agent table and
 press **Удалить агента** in the inspector. **The dashboard agent toggle is
 not required**: deletion is local server administration, not inter-agent
-messaging. An explicit confirmation warns that the identity, its saved
+messaging. An explicit confirmation warns that the identity, its permanent instructions, saved
 context, incoming/outgoing messages and PUSH adapter sessions will be deleted.
 
 Deleting agents uses the **same administrator HTTP Basic login** as the rest

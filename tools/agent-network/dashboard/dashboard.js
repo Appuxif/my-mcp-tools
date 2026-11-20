@@ -291,6 +291,10 @@
     contextButton.hidden = !agent;
     contextButton.disabled = !agent;
     contextButton.dataset.agentId = agent?.agent_id || '';
+    const instructionsButton = $('open-agent-instructions');
+    instructionsButton.hidden = !agent;
+    instructionsButton.disabled = !agent;
+    instructionsButton.dataset.agentId = agent?.agent_id || '';
     if (!agent) {
       selectedId = null;
       if (inspectorView === null) return;

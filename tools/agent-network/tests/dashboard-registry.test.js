@@ -62,7 +62,7 @@ function harness({fail=false,deferred=false}={}) {
     static revokeObjectURL(){}
   };
   const context=vm.createContext({
-    document,fetch,URL:URLMock,Blob,location:{origin:SITE},console,
+    document,fetch,URL:URLMock,Blob,TextEncoder,location:{origin:SITE},console,
     navigator:{clipboard:{writeText:async value=>{copied.push(value);}}},
     setTimeout:callback=>callback(),CustomEvent:class{
       constructor(type){this.type=type;}
@@ -113,6 +113,7 @@ test('one-time credential creation is admin-only and respects selected teams',as
   assert.equal(post.opts.headers['X-Agent-Token'],undefined);
   const payload=JSON.parse(post.opts.body);
   assert.equal(payload.name,'Codex-Dev');
+  assert.equal(payload.instructions,'');
   assert.deepEqual(payload.teams,['Ops']);
   assert.equal(h.element('registry-form').hidden,true);
   assert.equal(h.element('registry-result').hidden,false);
@@ -130,6 +131,27 @@ test('one-time credential creation is admin-only and respects selected teams',as
   h.element('agent-create-open').click();
   assert.equal(h.element('registry-result').hidden,true);
   assert.equal(h.element('registry-token-result').value,'');
+});
+
+test('creation accepts multiline instructions verbatim without leaking them into .env',async()=>{
+  const h=harness();
+  h.element('agent-create-open').click();
+  h.fill();
+  const prompt='Role: reviewer\n  Follow these rules\n🔍\n';
+  h.element('registry-instructions').value=prompt;
+  h.submit();await h.flush();
+  const post=h.req.find(x=>x.opts.method==='POST');
+  assert.equal(JSON.parse(post.opts.body).instructions,prompt);
+  h.element('registry-copy-env').click();await h.flush();
+  assert.equal(h.copied[0].includes(prompt),false);
+});
+
+test('creation rejects instructions exceeding UTF-8 limit',async()=>{
+  const h=harness();h.element('agent-create-open').click();h.fill();
+  h.element('registry-instructions').value='✓'.repeat(50000);
+  h.submit();await h.flush();
+  assert.match(h.element('registry-form-status').textContent,/128 KiB/);
+  assert.equal(h.req.some(x=>x.opts.method==='POST'),false);
 });
 
 test('server validation error does not expose credentials',async()=>{

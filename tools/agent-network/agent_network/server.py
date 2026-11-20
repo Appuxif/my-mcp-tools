@@ -55,7 +55,13 @@ class AdminAgentCreate(BaseModel):
     kind: str = "other"
     purpose: str = ""
     description: str = ""
+    instructions: str = ""
     teams: list[str]
+
+
+class AgentInstructionsUpdate(BaseModel):
+    instructions: str
+    expected_revision: int
 
 
 class AgentProfile(BaseModel):
@@ -284,6 +290,9 @@ def create_app(config: Config | None = None) -> FastAPI:
             "finalized; finalization never delivers a message or wakes an agent. "
             "To share a finalized note, explicitly include note_id in the text of "
             "a separate send_message. Notes expire 48 hours after creation. "
+            "On agent initialization, call read_instructions once to obtain "
+            "administrator-managed persistent instructions, which are distinct "
+            "from compact context and cannot be edited by the agent. "
             "Only on explicit user request, use save_context "
             "to store a compact summary. Use read_context on user request or after "
             "the user migrates this agent to a new chat; do not poll these tools. "
@@ -374,6 +383,14 @@ def create_app(config: Config | None = None) -> FastAPI:
         explicit user request or user-initiated migration to a new chat; do not
         poll or reread for each task/wake. Context is private to this agent."""
         return store.read_context(agent_id, token)
+
+    @mcp.tool()
+    @audit
+    def read_instructions(agent_id: str, token: str) -> dict:
+        """Read your own administrator-managed persistent instructions/prompt.
+        Call once at initialization or when explicitly reminded to reload them.
+        Read-only for agents; instructions are independent of saved context."""
+        return store.read_instructions(agent_id, token)
 
     @mcp.tool()
     @audit
@@ -644,10 +661,38 @@ def create_app(config: Config | None = None) -> FastAPI:
             raise HTTPException(400, "Invalid agent kind")
         try:
             result = store.register(body.name, body.role, body.kind,
-                                    body.purpose, body.description, teams=body.teams)
+                                    body.purpose, body.description, teams=body.teams,
+                                    instructions=body.instructions)
         except ValueError as exc:
-            raise HTTPException(409, str(exc)) from exc
+            status = 409 if ("already registered" in str(exc) or
+                             "Team assignment is not allowed on reconnect" in str(exc)) else 400
+            raise HTTPException(status, str(exc)) from exc
         return JSONResponse(result, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/dashboard/agents/{target_agent_id}/instructions")
+    def dashboard_read_instructions(target_agent_id: str, req: Request) -> JSONResponse:
+        """Only the authenticated Dashboard can inspect the full prompt."""
+        require_dashboard_admin(req)
+        try:
+            data = store.admin_read_instructions(target_agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, "Agent not found") from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+    @app.put("/api/v1/dashboard/agents/{target_agent_id}/instructions")
+    def dashboard_edit_instructions(target_agent_id: str, body: AgentInstructionsUpdate,
+                                    req: Request) -> JSONResponse:
+        """Only a human admin may modify persistent agent instructions."""
+        require_dashboard_admin(req)
+        try:
+            data = store.admin_update_instructions(
+                target_agent_id, body.instructions, body.expected_revision
+            )
+        except ValueError as exc:
+            status = (404 if str(exc) == "Unknown agent_id" else
+                      409 if str(exc) == "Instructions revision conflict" else 400)
+            raise HTTPException(status, str(exc)) from exc
+        return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
     @app.post("/api/v1/dashboard/agents/{target_agent_id}/credentials/rotate")
     async def dashboard_rotate_credentials(target_agent_id: str, req: Request) -> JSONResponse:

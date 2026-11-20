@@ -2,7 +2,7 @@
 
 Verified against `tools/agent-network/agent_network/server.py` and `store.py`. If the implementation changes, the live MCP `get_tool_schema` takes precedence over this reference.
 
-## Fourteen native MCP tools (not Dashboard HTTP endpoints)
+## Fifteen native MCP tools (not Dashboard HTTP endpoints)
 
 | Tool | Arguments | Result |
 |---|---|---|
@@ -14,6 +14,7 @@ Verified against `tools/agent-network/agent_network/server.py` and `store.py`. I
 | `heartbeat` | `agent_id`, `token` | `{"ok": true}`; updates MCP activity, not actual process or UI state. |
 | `save_context` | `agent_id`, `token`, `context` | Overwrites the caller's persistent compact summary (max 128 KiB UTF-8). `saved`, `updated_at`, `bytes`. Only on **explicit user request**. |
 | `read_context` | `agent_id`, `token` | Returns `exists`, `context`, `updated_at` for that agent only. On **user request or user-initiated migration**; not routine polling. |
+| `read_instructions` | `agent_id`, `token` | Own admin-defined persistent prompt, read-only: `instructions`, `updated_at`, `bytes`. Read at initialization or explicit reminder; empty text is valid. |
 | `create_note` | `agent_id`, `token`, `title`, `description` | Create private draft: `note_id`, `status`, `expires_at`. No delivery. |
 | `add_to_note` | `agent_id`, `token`, `note_id`, `title`, `description` | Add a subnote to own draft: `note_id`, `subnote_id`. |
 | `update_subnote` | `agent_id`, `token`, `note_id`, `subnote_id`, `title`, `description` | Revise a subnote while draft. |
@@ -70,7 +71,7 @@ reviewer/developer protocol. Generic Notes do not enforce task workflows.
 - **New identities require the human administrator.** In local Dashboard,
   open **Пул агентов → + Создать агента** and choose a unique `name`,
   `role`, `kind` (`codex`, `chatgpt`, `claude`, `other`), purpose,
-  description, and 1–12 team names. The server creates the agent and its
+  description, optional permanent instructions/prompt, and 1–12 team names. The server creates the agent and its
   initial memberships in a single transaction.
 - `POST /api/v1/dashboard/agents` requires Dashboard HTTP Basic
   authentication and same-origin/loopback checks. It returns
@@ -94,6 +95,16 @@ reviewer/developer protocol. Generic Notes do not enforce task workflows.
   verification.
   Every wake prompt includes that agent's ID and token so the LLM can call
   `get_messages` again; no message bodies or admin secrets are forwarded.
+- **Admin instructions:** each agent has a separate permanent prompt
+  (up to 128 KiB UTF-8, existing agents start empty), editable only via
+  authenticated Dashboard GET/PUT `/api/v1/dashboard/agents/{agent_id}/instructions`.
+  An agent can only read its **own** prompt via `read_instructions`, and
+  it is never copied into global snapshots or compact context. Dashboard reads
+  include a `revision` integer; admin PUT requires `expected_revision` and
+  returns **409 Conflict** for stale edits (no silent overwrite). The editor
+  warns of unsaved drafts before reload/close and supports copying for a manual merge.
+  The extension
+  bootstrap and manual reminder request `read_instructions` every time.
 - **Chrome Extension:** its trusted worker may create a new ChatGPT agent
   through `POST /api/v1/agents/register` only after the human supplies
   the local `admin-token` via the popup. Registration with no admin

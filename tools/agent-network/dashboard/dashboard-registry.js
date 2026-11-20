@@ -123,10 +123,15 @@
       kind:$('registry-kind').value,
       purpose:$('registry-purpose').value.trim(),
       description:$('registry-description').value.trim(),
+      instructions:$('registry-instructions').value,
       teams:[...state.teams],
     };
     if (!payload.name || !payload.role) {
       setStatus('Заполните имя и роль агента.');
+      return;
+    }
+    if(new TextEncoder().encode(payload.instructions).length>131072) {
+      setStatus('Инструкции не должны превышать 128 KiB UTF-8.');
       return;
     }
     state.creating = true;

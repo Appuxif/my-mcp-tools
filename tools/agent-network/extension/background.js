@@ -609,6 +609,8 @@ function bootstrapPrompt(record, migrated=false) {
     'agent_id: ' + record.agentId,
     'token: ' + record.token,
     'Keep the token private. Use list_agents/get_messages/send_message/ack_message.',
+    'Call native MCP read_instructions(agent_id, token) NOW to load the permanent administrator-defined instructions before starting work.',
+    'These instructions are independent of saved context, read-only for agents, and may be updated in the Dashboard.',
     'Call get_messages now to check for pending work. Wake signals will arrive through this chat.',
     'Use save_context only when the user explicitly asks you to compact/save this chat; never automatically.',
     ...(migrated ? [

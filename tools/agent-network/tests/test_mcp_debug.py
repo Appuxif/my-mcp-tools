@@ -145,7 +145,7 @@ class StdioDebugIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     response = await session.initialize()
                     self.assertEqual(response.server_info.name, "agent-network")
                     tools = await session.list_tools()
-                    self.assertEqual(len(tools.tools), 14)
+                    self.assertEqual(len(tools.tools), 15)
                     await session.call_tool(
                         "get_messages",
                         arguments=credentials,
