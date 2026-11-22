@@ -71,7 +71,11 @@ async function adminRequest(server, secret, path, method='GET', body=null, recor
     signal:AbortSignal.timeout(8000),
   });
   const data=await response.json().catch(()=>({}));
-  if(!response.ok) throw Error(data.detail || 'Admin HTTP '+response.status);
+  if(!response.ok) {
+    const error=new Error(data.detail || 'Admin HTTP '+response.status);
+    error.status=response.status;
+    throw error;
+  }
   return data;
 }
 async function adminConnect(tabId, secret) {
@@ -119,6 +123,30 @@ async function adminSetTeams(tabId,teams) {
   });
   return {agent};
 }
+async function revokeChatCredential(record) {
+  if(!record?.chatCredentialId) return;
+  const server=normalizeServer(record.server||DEFAULT_SERVER);
+  const secret=await adminToken(server);
+  if(!secret) throw Error('Для отвязки агента нужен admin-token.');
+  await adminRequest(server,secret,
+    '/api/v1/admin/agents/'+encodeURIComponent(record.agentId)+
+    '/chat-credentials/'+encodeURIComponent(record.chatCredentialId),'DELETE');
+}
+async function unlinkAgent(tabId) {
+  const {key,record}=await currentRecord(tabId);
+  if(!key || !record) throw Error('Чат не привязан к агенту.');
+  await assertNoPendingTransfer(record);
+  // Revoke on the server before dropping the local credential.
+  await revokeChatCredential(record);
+  disconnect(record.ownerTabId);
+  await updateRecords(entries=>{
+    if(entries[key]?.agentId!==record.agentId) throw Error('Привязка изменилась.');
+    delete entries[key];
+  });
+  // Stop all scheduled wakeups before dropping this chat binding.
+  await disableSchedule(record);
+  return {unlinked:true,legacyTokenNotRevoked:!record.chatCredentialId};
+}
 async function serverForTab(tabId, record = null) {
   const data = await chrome.storage.local.get(['serverByTab', 'defaultServer']);
   return normalizeServer(
@@ -143,9 +171,13 @@ async function setServer(tabId, raw) {
   const url = normalizeServer(raw);
   const {key,entries,record} = await currentRecord(tabId);
   const before = await serverForTab(tabId, record);
+  if(before!==url && record) await assertNoPendingTransfer(record);
   if (before !== url && record?.active)
     throw Error('Сначала останови агента, затем переключи сервер.');
   if (before !== url && record) {
+    // The session token is only valid while its local chat binding exists.
+    await revokeChatCredential(record);
+    await disableSchedule(record);
     disconnect(record.ownerTabId);
     await updateRecords(records => {
       if (records[key]?.agentId === record.agentId) delete records[key];
@@ -316,32 +348,42 @@ async function ping(tabId, record, ws) {
   const s = await probe(tabId, record);
   ws.send(JSON.stringify({ type: 'ping', state: s.state || 'unknown' }));
 }
+// Scheduled and server-triggered wakes must not race in the same chat.
+const wakeInFlight = new Set();
+async function guardedWake(agentId, action) {
+  if (wakeInFlight.has(agentId)) throw Error('another wake is in progress');
+  wakeInFlight.add(agentId);
+  try { return await action(); }
+  finally { wakeInFlight.delete(agentId); }
+}
 async function wake(tabId, record, ws, msg) {
   let status = 'rejected';
   try {
-    const s = await probe(tabId, record);
-    if (s.state !== 'idle') throw Error('chat state: ' + s.state);
-    const text = [
-      '[Agent Network wake]',
-      'There are ' + Number(msg.pending_count || 0) + ' pending messages for agent ' + record.name + '.',
-      'Agent name: ' + record.name,
-      'agent_id: ' + record.agentId,
-      'token: ' + record.token,
-      'Use these exact credentials with the native agent-network MCP get_messages tool. Do not register a new agent.',
-      'Keep the token private; do not send it in inter-agent messages or logs.',
-      'Read and acknowledge messages through MCP, then continue the assigned work.',
-      'This is only a wake signal; the message contents are never delivered through the browser.',
-    ].join('\n');
-    const tab = await chrome.tabs.get(Number(tabId));
-    const current=(await storage())[chatKey(record.chatUrl)];
-    if (chatKey(tab?.url) !== chatKey(record.chatUrl) ||
-        current?.agentId !== record.agentId || current?.token !== record.token ||
-        !current?.active)
-      throw Error('conversation binding changed');
-    const result = await askTab(tabId, {
-      type: 'agent:send', text, url: tab.url, wakeId: msg.wake_id,
+    await guardedWake(record.agentId, async () => {
+      const s = await probe(tabId, record);
+      if (s.state !== 'idle') throw Error('chat state: ' + s.state);
+      const text = [
+        '[Agent Network wake]',
+        'There are ' + Number(msg.pending_count || 0) + ' pending messages for agent ' + record.name + '.',
+        'Agent name: ' + record.name,
+        'agent_id: ' + record.agentId,
+        'token: ' + record.token,
+        'Use these exact credentials with the native agent-network MCP get_messages tool. Do not register a new agent.',
+        'Keep the token private; do not send it in inter-agent messages or logs.',
+        'Read and acknowledge messages through MCP, then continue the assigned work.',
+        'This is only a wake signal; the message contents are never delivered through the browser.',
+      ].join('\n');
+      const tab = await chrome.tabs.get(Number(tabId));
+      const current=(await storage())[chatKey(record.chatUrl)];
+      if (chatKey(tab?.url) !== chatKey(record.chatUrl) ||
+          current?.agentId !== record.agentId || current?.token !== record.token ||
+          !current?.active)
+        throw Error('conversation binding changed');
+      const result = await askTab(tabId, {
+        type: 'agent:send', text, url: tab.url, wakeId: msg.wake_id,
+      });
+      if (!result?.ok) throw Error(result?.error || 'Could not submit wake prompt');
     });
-    if (!result?.ok) throw Error(result?.error || 'Could not submit wake prompt');
     status = 'submitted';
   } catch (error) {
     console.warn('Agent Network wake unavailable:', String(error));
@@ -435,10 +477,13 @@ async function connectOwned(tabId, record) {
   ws.onerror = () => {};
 }
 async function resumeAll() {
+  await recoverPendingTransfers();
+  const pending=await pendingChatTransfers();
+  const unresolved=new Set(Object.values(pending).map(p=>p.from));
   const entries=await storage();
   const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'}).catch(()=>[]);
   for (const [key,record] of Object.entries(entries)) {
-    if (!record.active || migratingKeys.has(key)) continue;
+    if (!record.active || migratingKeys.has(key) || unresolved.has(key)) continue;
     let owner = record.ownerTabId
       ? await chrome.tabs.get(Number(record.ownerTabId)).catch(()=>null)
       : null;
@@ -629,26 +674,29 @@ function existingCandidates(entries, server, excludeKey=null) {
   ).map(([key,r]) => ({
     chatUrl:key,agentId:r.agentId,name:r.name,
     role:r.role,purpose:r.purpose,description:r.description,active:!!r.active
-  })).sort((a,b)=>a.name.localeCompare(b.name));
+  })).map(agent=>({...agent,source:'local',kind:'chatgpt'}))
+    .sort((a,b)=>a.name.localeCompare(b.name));
 }
 async function availableAgents(tabId, trustedPopup=false) {
   const {key,record}=await currentRecord(tabId);
   const server=await serverForTab(tabId,record);
   let entries=await storage();
   let candidates=existingCandidates(entries,server,key);
-  if(trustedPopup && Object.values(entries).some(agent=>
-    agent?.agentId && (agent.server||DEFAULT_SERVER)===server)) {
-    // Only the popup may use the saved administrator token. Delete local
-    // registrations ONLY after an authenticated, authoritative DB snapshot.
-    let reconciled=false;
+  let syncError='';
+  let authoritative=false;
+  if(trustedPopup) {
     try {
       const secret=await adminToken(server);
       if(secret) {
-        const snapshot=await adminRequest(server,secret,'/api/v1/admin/agent-ids');
-        if(!Array.isArray(snapshot.agent_ids) ||
-           !snapshot.agent_ids.every(id=>typeof id==='string'))
-          throw Error('Invalid agent identity snapshot');
-        const live=new Set(snapshot.agent_ids);
+        const result=await adminRequest(server,secret,'/api/v1/admin/agents');
+        if(!Array.isArray(result.items) || !result.items.every(a=>
+          a && typeof a.agent_id==='string' && typeof a.name==='string' &&
+          typeof a.role==='string' && typeof a.kind==='string' &&
+          typeof a.purpose==='string' && typeof a.description==='string'))
+          throw Error('Invalid agent catalog');
+        const ids=result.items.map(a=>a.agent_id);
+        if(new Set(ids).size!==ids.length) throw Error('Duplicate agent identities');
+        const live=new Set(ids);
         await updateRecords(records=>{
           for(const [chat,agent] of Object.entries(records)) {
             if(agent?.agentId && (agent.server||DEFAULT_SERVER)===server &&
@@ -660,37 +708,50 @@ async function availableAgents(tabId, trustedPopup=false) {
           }
         });
         entries=await storage();
-        candidates=existingCandidates(entries,server,key);
-        reconciled=true;
+        authoritative=true;
+        const local=new Map(existingCandidates(entries,server,key)
+          .map(a=>[a.agentId,a]));
+        candidates=result.items.filter(a=>a.agent_id!==record?.agentId)
+          .map(a=>{
+            const linked=local.get(a.agent_id);
+            return {
+              agentId:a.agent_id,name:a.name,kind:a.kind,role:a.role,
+              purpose:a.purpose,description:a.description,
+              teams:Array.isArray(a.teams)?a.teams:[],
+              chatUrl:linked?.chatUrl || null,
+              active:!!linked?.active,source:linked?'local':'server',
+            };
+          }).sort((a,b)=>a.name.localeCompare(b.name));
       }
     } catch(error) {
-      // An offline or outdated server must never cause destructive cleanup.
-      console.warn('Agent Network registry reconciliation:',String(error));
+      // An unavailable server must never cause destructive cleanup.
+      syncError=String(error.message||error);
+      console.warn('Agent Network catalog sync failed:',syncError);
     }
-    if(!reconciled) {
-      // Without admin access, hide credentials the server rejects, but keep
-      // those records locally: token rotation and deletion are indistinguishable.
-      const visible=await Promise.all(candidates.map(async agent=>{
-        const local=entries[agent.chatUrl];
-        try {
-          const response=await fetch(server+'/api/v1/agents/hud',{
-            method:'GET',cache:'no-store',signal:AbortSignal.timeout(8000),
-            headers:{'Accept':'application/json',
-                     'X-Agent-Id':local.agentId,'X-Agent-Token':local.token},
-          });
-          if(response.status===403) return false;
-          if(!response.ok) return true; // Don't hide agents on server errors.
-          const snapshot=await response.json();
-          return snapshot.agents?.some(a=>
-            a.agent_id===local.agentId && a.name===local.name)===true;
-        } catch { return true; } // Offline: preserve existing options.
-      }));
-      candidates=candidates.filter((_,i)=>visible[i]);
-    }
+  }
+  if(trustedPopup && !authoritative && candidates.length) {
+    // Without an authoritative response we can hide agents whose local token
+    // is rejected, but must preserve their bindings (rotation vs deletion).
+    const visible=await Promise.all(candidates.map(async agent=>{
+      const local=entries[agent.chatUrl];
+      try {
+        const response=await fetch(server+'/api/v1/agents/hud',{
+          method:'GET',cache:'no-store',signal:AbortSignal.timeout(8000),
+          headers:{'Accept':'application/json','X-Agent-Id':local.agentId,
+                   'X-Agent-Token':local.token},
+        });
+        if(response.status===403) return false;
+        if(!response.ok) return true;
+        const snapshot=await response.json();
+        return snapshot.agents?.some(a=>
+          a.agent_id===local.agentId && a.name===local.name)===true;
+      } catch { return true; }
+    }));
+    candidates=candidates.filter((_,i)=>visible[i]);
   }
   const removedCurrent=!!record && !entries[key];
   return {items:candidates,canMigrate:!record || removedCurrent,
-          removedCurrent,server};
+          removedCurrent,server,syncError,synced:authoritative};
 }
 
 async function migrationPreview(tabId,name,agentId='') {
@@ -711,6 +772,7 @@ async function migrationPreview(tabId,name,agentId='') {
     migrate:true,agentId:source.agentId,name:source.name,
     fromChatUrl:source.chatUrl,toChatUrl:tab.url,
     needsNewChat:!target,server,
+    rotatesPrimary:!(entries[source.chatUrl]?.chatCredentialId),
   };
 }
 
@@ -723,12 +785,15 @@ async function verifyMigrationAgent(server,record) {
       'X-Agent-Token':record.token,
     },
   });
+  // A rotated or expired old chat token is a stale LOCAL binding, not
+  // grounds to reject a human-confirmed, admin-authorized migration.
+  if(response.status===401 || response.status===403) return false;
   if(!response.ok) throw Error(
-    'Не удалось подтвердить доступ к старому агенту (HTTP '+response.status+').'
+    'Не удалось связаться с сервером агента (HTTP '+response.status+').'
   );
   const snapshot=await response.json();
-  if(!snapshot.agents?.some(a=>a.agent_id===record.agentId && a.name===record.name))
-    throw Error('Сервер вернул неподходящую идентичность агента.');
+  return !!snapshot.agents?.some(a=>
+    a.agent_id===record.agentId && a.name===record.name);
 }
 
 async function waitForConversation(tabId, originalUrl, timeoutMs=30000) {
@@ -745,6 +810,238 @@ async function waitForConversation(tabId, originalUrl, timeoutMs=30000) {
   throw Error('ChatGPT не выдал ID новой беседы. Старый агент сохранён без изменений.');
 }
 const migratingKeys=new Set();
+async function waitForChatIdle(tabId,expectedKey,timeoutMs=90000) {
+  const deadline=Date.now()+timeoutMs;
+  while(Date.now()<deadline) {
+    const tab=await conversationTab(tabId,expectedKey);
+    const readiness=await probe(tabId,{chatUrl:tab.url});
+    if(readiness?.state==='idle') return tab;
+    if(readiness?.state==='draft')
+      throw Error('В новом чате есть черновик или вложение. Перенос отменён.');
+    await new Promise(resolve=>setTimeout(resolve,350));
+  }
+  throw Error('Новый чат ещё генерирует ответ; дождись окончания и повтори перенос.');
+}
+
+const PENDING_TRANSFER_STORE='pendingChatTransfers';
+let pendingTransferWriteQueue=Promise.resolve();
+function pendingTransferKey(record) {
+  return normalizeServer(record.server||DEFAULT_SERVER)+'|'+record.agentId;
+}
+async function pendingChatTransfers() {
+  await adminStorageProtected;
+  return (await chrome.storage.local.get(PENDING_TRANSFER_STORE))[PENDING_TRANSFER_STORE]||{};
+}
+async function assertNoPendingTransfer(record) {
+  if(record?.agentId && (await pendingChatTransfers())[pendingTransferKey(record)])
+    throw Error('У агента незавершённый перенос. Подожди восстановления связи.');
+}
+async function updatePendingTransfers(mutator) {
+  const op=pendingTransferWriteQueue.catch(()=>{}).then(async()=>{
+    const current=await pendingChatTransfers();
+    const next={...current};
+    const result=mutator(next);
+    await chrome.storage.local.set({[PENDING_TRANSFER_STORE]:next});
+    return result;
+  });
+  pendingTransferWriteQueue=op.catch(()=>{});
+  return op;
+}
+async function savePendingTransfer(pending) {
+  return updatePendingTransfers(records=>{
+    if(records[pending.key]) throw Error('Перенос агента уже ожидает восстановления.');
+    records[pending.key]=pending;
+  });
+}
+async function clearPendingTransfer(key,transferId) {
+  return updatePendingTransfers(records=>{
+    if(records[key]?.transferId===transferId) delete records[key];
+  });
+}
+function transferBase(pending) {
+  return '/api/v1/admin/agents/'+encodeURIComponent(pending.agentId);
+}
+async function finalizePendingTransfer(pending) {
+  const {from,to,next,agentId,key,transferId}=pending;
+  const updated=await updateRecords(entries=>{
+    const source=entries[from];
+    const destination=entries[to];
+    if(destination?.agentId===agentId &&
+       destination.chatCredentialId===transferId) return {...destination};
+    if(destination || !source || source.agentId!==agentId ||
+       (source.chatCredentialId||null)!==(pending.sourceTokenId||null))
+      throw Error('Невозможно восстановить перенос: локальная привязка изменилась.');
+    const moved={...next,active:true,bootstrapDone:true,bootstrapMigrated:true};
+    delete entries[from];
+    entries[to]=moved;
+    return {...moved};
+  });
+  await clearPendingTransfer(key,transferId);
+  return updated;
+}
+function isForeignChatLease(pending,binding) {
+  return binding?.agent_id===pending.agentId &&
+    typeof binding.token_id==='string' && !!binding.token_id &&
+    binding.token_id!==pending.sourceTokenId &&
+    binding.token_id!==pending.transferId &&
+    typeof binding.chat_url==='string' &&
+    chatKey(binding.chat_url)===binding.chat_url;
+}
+async function forgetRetiredLocalTransfer(pending) {
+  // An administrator revoked the old lease or moved it to another browser.
+  // Never activate A or touch the new server-side lease (C).
+  await updateRecords(entries=>{
+    const source=entries[pending.from];
+    if(source?.agentId===pending.agentId &&
+       (source.chatCredentialId||null)===(pending.sourceTokenId||null))
+      delete entries[pending.from];
+  });
+  await disableSchedule({server:pending.server,agentId:pending.agentId});
+  await clearPendingTransfer(pending.key,pending.transferId);
+  return {status:'retired'};
+}
+async function legacySourceStillValid(pending) {
+  const source=(await storage())[pending.from];
+  if(!source?.token || source.agentId!==pending.agentId ||
+     source.chatCredentialId || !pending.legacyPrimary) return false;
+  let response;
+  try {
+    response=await fetch(pending.server+'/api/v1/agents/hud',{
+      method:'GET',cache:'no-store',signal:AbortSignal.timeout(8000),
+      headers:{Accept:'application/json','X-Agent-Id':source.agentId,
+               'X-Agent-Token':source.token},
+    });
+  } catch {
+    // An unavailable server is NOT evidence that the primary token was
+    // revoked. Leave the pending transfer inert for the next retry.
+    throw Error('Не удалось проверить старый основной токен; повторим позже.');
+  }
+  if(response.status===401 || response.status===403) return false;
+  if(!response.ok)
+    throw Error('Сервер не подтвердил состояние старого токена (HTTP '+
+      response.status+').');
+  const snapshot=await response.json();
+  if(!snapshot.agents?.some(a=>a.agent_id===source.agentId &&
+                               a.name===source.name))
+    throw Error('Неоднозначная идентичность агента при восстановлении.');
+  return true;
+}
+async function restoreSourceAfterAbort(pending) {
+  await updateRecords(entries=>{
+    const source=entries[pending.from];
+    if(source?.agentId===pending.agentId &&
+       (source.chatCredentialId||null)===(pending.sourceTokenId||null))
+      // A legacy permanent primary may still authenticate after C binds.
+      // Never auto-resume its PUSH after a failed migration: the user can
+      // retry migration, while there is no duplicate background wake.
+      source.active=pending.legacyPrimary?false:pending.sourceWasActive;
+  });
+  await clearPendingTransfer(pending.key,pending.transferId);
+  return {status:'rolled_back'};
+}
+async function resolveAfterTransferAbort(pending,admin) {
+  // DELETE may race POST commit or a separate admin rebind. Its 200 response
+  // alone (even aborted:true) does not prove the active lease is still A.
+  // Stage is definitely absent by now; the fresh authoritative GET decides.
+  const binding=await adminRequest(pending.server,admin,
+    transferBase(pending)+'/chat-binding');
+  if(binding?.agent_id!==pending.agentId)
+    throw Error('Сервер вернул неверную идентичность после отмены переноса.');
+  if(binding.token_id===pending.transferId && binding.chat_url===pending.to)
+    return {status:'committed',record:await finalizePendingTransfer(pending)};
+  if(pending.recoveryStaleSource) {
+    // The original browser token was invalid even before migration.
+    // Its local record must NEVER be reactivated after an aborted commit.
+    if((binding.token_id===null && binding.chat_url===null) ||
+       (typeof binding.token_id==='string' && !!binding.token_id &&
+        typeof binding.chat_url==='string' &&
+        chatKey(binding.chat_url)===binding.chat_url))
+      return forgetRetiredLocalTransfer(pending);
+    throw Error('Некорректная серверная привязка после восстановления.');
+  }
+  if(binding.token_id===pending.sourceTokenId &&
+     binding.chat_url===pending.from)
+    return restoreSourceAfterAbort(pending);
+  if(binding.token_id===null && binding.chat_url===null) {
+    // Legacy A has no scoped server lease until commit. After a confirmed
+    // abort, its primary credential may still be valid. Preserve it only
+    // when the server independently authenticates the OLD primary bearer.
+    if(pending.legacyPrimary && await legacySourceStillValid(pending))
+      return restoreSourceAfterAbort(pending);
+    return forgetRetiredLocalTransfer(pending);
+  }
+  if(isForeignChatLease(pending,binding))
+    return forgetRetiredLocalTransfer(pending);
+  throw Error('Неоднозначная новая привязка агента; восстановление отложено.');
+}
+async function rollbackPendingTransfer(pending,admin) {
+  await adminRequest(pending.server,admin,
+    transferBase(pending)+'/chat-transfers/'+
+      encodeURIComponent(pending.transferId),'DELETE');
+  return resolveAfterTransferAbort(pending,admin);
+}
+async function discardRevokedPendingTransfer(pending,admin,agentDeleted=false) {
+  if(agentDeleted) return forgetRetiredLocalTransfer(pending);
+  await adminRequest(pending.server,admin,
+    transferBase(pending)+'/chat-transfers/'+
+      encodeURIComponent(pending.transferId),'DELETE');
+  return resolveAfterTransferAbort(pending,admin);
+}
+async function reconcilePendingTransfer(pending,admin) {
+  let binding;
+  try {
+    binding=await adminRequest(pending.server,admin,
+      transferBase(pending)+'/chat-binding');
+  } catch(error) {
+    if(error.status===404 && String(error.message).includes('Unknown agent_id'))
+      return discardRevokedPendingTransfer(pending,admin,true);
+    throw error;
+  }
+  if(binding?.agent_id!==pending.agentId)
+    throw Error('Сервер вернул неверную идентичность при восстановлении.');
+  if(binding.token_id===pending.transferId && binding.chat_url===pending.to)
+    return {status:'committed',record:await finalizePendingTransfer(pending)};
+  if(pending.recoveryStaleSource) {
+    if((binding.token_id===null && binding.chat_url===null) ||
+       (typeof binding.token_id==='string' && !!binding.token_id &&
+        typeof binding.chat_url==='string' &&
+        chatKey(binding.chat_url)===binding.chat_url))
+      return discardRevokedPendingTransfer(pending,admin);
+    throw Error('Некорректная серверная привязка при восстановлении.');
+  }
+  if(binding.token_id===pending.sourceTokenId &&
+     binding.chat_url===pending.from)
+    return rollbackPendingTransfer(pending,admin);
+  if(binding.token_id===null && binding.chat_url===null) {
+    if(pending.legacyPrimary)
+      return rollbackPendingTransfer(pending,admin);
+    return discardRevokedPendingTransfer(pending,admin);
+  }
+  if(isForeignChatLease(pending,binding))
+    return discardRevokedPendingTransfer(pending,admin);
+  throw Error('Серверная привязка изменилась; автоматическое восстановление остановлено.');
+}
+let pendingRecoveryPromise=null;
+async function recoverPendingTransfers() {
+  if(pendingRecoveryPromise) return pendingRecoveryPromise;
+  const work=(async()=>{
+    const all=await pendingChatTransfers();
+    for(const pending of Object.values(all)) {
+      if(!pending?.key || migratingKeys.has(pending.from)) continue;
+      try {
+        const admin=await adminToken(pending.server);
+        if(!admin) continue;
+        await reconcilePendingTransfer(pending,admin);
+      } catch(error) {
+        console.warn('Agent Network: pending transfer still unresolved:',
+                     String(error.message||error));
+      }
+    }
+  })();
+  pendingRecoveryPromise=work;
+  try {await work;}
+  finally {if(pendingRecoveryPromise===work) pendingRecoveryPromise=null;}
+}
 async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestination) {
   const tab=await chrome.tabs.get(Number(tabId));
   if(!tab || tab.url!==expectedDestination)
@@ -761,43 +1058,140 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
   const server=await serverForTab(tabId);
   if(server!==(old.server||DEFAULT_SERVER))
     throw Error('Нельзя перенести агента между серверами.');
-  await verifyMigrationAgent(server,old);
-  // Keep the old binding durable until the new chat accepts its bootstrap.
-  // Temporarily disconnect old PUSH to avoid delivering wakes into both chats.
+  if((await pendingChatTransfers())[pendingTransferKey(old)])
+    throw Error('У агента есть незавершённый перенос. Дождись восстановления.');
+  const admin=await adminToken(server);
+  if(!admin) throw Error('Для переноса агента настрой admin-token в расширении.');
+  const oldTokenValid=await verifyMigrationAgent(server,old);
+  let authoritativeAgent=null;
+  if(!oldTokenValid) {
+    // Admin authentication (not the stale agent token) is the permission
+    // required to recover an existing agent. Never create another identity.
+    const catalogue=await adminRequest(server,admin,'/api/v1/admin/agents');
+    authoritativeAgent=catalogue.items?.find(agent=>
+      agent.agent_id===old.agentId && agent.kind==='chatgpt');
+    if(!authoritativeAgent)
+      throw Error('Агент больше не найден на сервере. Выбери другого.');
+    // The old bearer has already been rejected by the server. Do not keep
+    // pretending its PUSH channel is healthy while recovering the binding.
+    disconnect(old.ownerTabId);
+    await updateRecords(entries=>{
+      if(entries[fromChatUrl]?.agentId===old.agentId &&
+         entries[fromChatUrl]?.token===old.token)
+        entries[fromChatUrl].active=false;
+    });
+  }
+
+  // Before a new ChatGPT conversation has a /c/ URL, create it with a
+  // completely secret-free message. Do not bootstrap the old bearer.
+  if(!targetKey) {
+    const created=await askTab(tabId,{
+      type:'agent:send',
+      text:'Agent Network: подготовка беседы для переноса агента. '+
+        'Ожидай отдельного сообщения с новыми инструкциями.',
+      url:tab.url,allowNewChat:true,
+    });
+    if(!created?.ok)
+      throw Error('Не удалось создать новый чат: '+(created?.error||'unknown'));
+    const destination=await waitForConversation(tabId,tab.url);
+    targetKey=destination.key;
+    await waitForChatIdle(tabId,targetKey);
+  }
+  const destinationBefore=await conversationTab(tabId,targetKey);
+  if(targetKey===fromChatUrl || (await storage())[targetKey])
+    throw Error('Целевая беседа изменилась или уже содержит агента.');
+
   migratingKeys.add(fromChatUrl);
   disconnect(old.ownerTabId);
-  let transferred=false;
+  let prepared=null;
+  let committed=false;
+  let commitPending=false;
   try {
-    const result=await askTab(tabId,{
-      type:'agent:send',text:bootstrapPrompt(old,true),
-      url:tab.url,allowNewChat:!targetKey,
+    // Stage B's new bearer ONLY after the server validates the destination
+    // is not occupied. A still owns its old token until commit.
+    prepared=await adminRequest(server,admin,
+      '/api/v1/admin/agents/'+encodeURIComponent(old.agentId)+'/chat-transfers',
+      'POST',{source_token_id:oldTokenValid?(old.chatCredentialId||''):'',
+              old_chat_url:fromChatUrl,new_chat_url:targetKey,
+              ...(oldTokenValid && !old.chatCredentialId
+                ?{legacy_primary_token:old.token}:{}),
+              admin_recovery:!oldTokenValid});
+    if(prepared.agent_id!==old.agentId || !prepared.transfer_id ||
+       !prepared.token || prepared.token_id!==prepared.transfer_id ||
+       prepared.chat_url!==targetKey)
+      throw Error('Сервер вернул неверный подготовленный перенос.');
+    const next={
+      ...old,
+      ...(authoritativeAgent ? {
+        name:authoritativeAgent.name,role:authoritativeAgent.role,
+        purpose:authoritativeAgent.purpose,
+        description:authoritativeAgent.description,
+        teams:authoritativeAgent.teams,
+      } : {}),
+      token:prepared.token,chatCredentialId:prepared.transfer_id,
+      chatUrl:targetKey,ownerTabId:Number(tabId),
+      active:false,bootstrapDone:false,bootstrapMigrated:true,
+    };
+    // Staged bearer is NOT authorized by Store.verify until commit.
+    // Any failed/ambiguous send can be aborted without revoking A.
+    const sent=await askTab(tabId,{
+      type:'agent:send',text:bootstrapPrompt(next,true),
+      url:destinationBefore.url,allowNewChat:false,
     });
-    if(!result?.ok) throw Error('Новый чат не принял инициализацию: '+(result?.error||'unknown'));
-    const destination=targetKey
-      ? {tab:await chrome.tabs.get(Number(tabId)),key:targetKey}
-      : await waitForConversation(tabId,tab.url);
-    if(chatKey(destination.tab?.url)!==destination.key)
-      throw Error('Новая беседа изменилась во время инициализации.');
-    targetKey=destination.key;
-    // Move, not copy: only the new chat should use this agent identity.
-    const updated=await updateRecords(entries=>{
-      if(entries[fromChatUrl]?.agentId!==expectedAgentId || entries[targetKey])
-        throw Error('Привязки изменились при переносе. Попробуй ещё раз.');
-      const moved={
-        ...entries[fromChatUrl],chatUrl:targetKey,
-        ownerTabId:Number(tabId),active:true,bootstrapDone:true,
-        bootstrapMigrated:true,
-      };
-      delete entries[fromChatUrl];
-      entries[targetKey]=moved;
-      return moved;
+    if(!sent?.ok)
+      throw Error('Новый чат не принял инициализацию: '+(sent?.error||'unknown'));
+    await conversationTab(tabId,targetKey);
+    if((await storage())[targetKey])
+      throw Error('Целевая беседа уже занята во время переноса.');
+
+    const pending={
+      key:pendingTransferKey(old),server,agentId:old.agentId,
+      transferId:prepared.transfer_id,sourceTokenId:old.chatCredentialId||null,
+      legacyPrimary:oldTokenValid && !old.chatCredentialId,
+      recoveryStaleSource:!oldTokenValid,
+      from:fromChatUrl,to:targetKey,
+      next:{...next,active:true,bootstrapDone:true},
+      sourceWasActive:!!old.active,
+    };
+    // Persist before POST commit so an ambiguous result cannot resurrect
+    // A's revoked token. The new token stays extension-local until recovery.
+    await savePendingTransfer(pending);
+    commitPending=true;
+    await updateRecords(entries=>{
+      const current=entries[fromChatUrl];
+      if(!current || current.agentId!==old.agentId ||
+         (current.chatCredentialId||null)!==(old.chatCredentialId||null) ||
+         current.token!==old.token)
+        throw Error('Привязка агента изменилась перед подтверждением переноса.');
+      current.active=false;
     });
-    transferred=true;
+    const base=transferBase(pending);
+    let outcome;
+    try {
+      const result=await adminRequest(server,admin,
+        base+'/chat-transfers/'+encodeURIComponent(prepared.transfer_id)+'/commit',
+        'POST');
+      if(result.agent_id!==old.agentId || result.token_id!==next.chatCredentialId ||
+         result.chat_url!==targetKey || result.status!=='committed')
+        throw Error('Сервер вернул неверное подтверждение переноса.');
+      outcome={status:'committed',record:await finalizePendingTransfer(pending)};
+    } catch(error) {
+      try {outcome=await reconcilePendingTransfer(pending,admin);}
+      catch {
+        // The server may have committed. Keep the durable record, and keep
+        // source PUSH disabled until metadata reconciliation becomes possible.
+        throw Error('Результат переноса неизвестен. Привязка временно '+
+          'заблокирована, будет восстановлена при подключении к серверу.');
+      }
+      if(outcome.status==='rolled_back') throw error;
+    }
+    if(outcome.status!=='committed')
+      throw Error('Перенос не подтверждён сервером.');
+    committed=true;
+    const updated=outcome.record;
     let connectionWarning='';
     try { await connect(tabId,updated); }
     catch(error) {
-      // The identity was successfully transferred and must never roll back
-      // after ChatGPT accepted the new bootstrap. PUSH can reconnect later.
       connectionWarning='PUSH сейчас недоступен: '+String(error.message||error);
     }
     return {migrated:true,agentId:updated.agentId,name:updated.name,
@@ -805,7 +1199,25 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
             connected:!!connections.get(Number(tabId)),connectionWarning};
   } finally {
     migratingKeys.delete(fromChatUrl);
-    if(!transferred) await resumeAll(); // Failed migration keeps old owner working.
+    if(!committed && !commitPending) {
+      if(prepared?.transfer_id) {
+        try {
+          await adminRequest(server,admin,
+            '/api/v1/admin/agents/'+encodeURIComponent(old.agentId)+
+            '/chat-transfers/'+encodeURIComponent(prepared.transfer_id),'DELETE');
+        } catch(error) {
+          console.warn('Transfer abort failed; inactive credential will expire:',
+                       String(error.message||error));
+        }
+      }
+      await resumeAll(); // Rejected pre-commit migration keeps A operational.
+    }
+    // Once a commit may have occurred, NEVER blindly revive A's old token.
+    // A confirmed rollback clears the durable record, so it is safe to
+    // reconnect A only after the in-flight migration flag is removed.
+    if(!committed && commitPending &&
+       !(await pendingChatTransfers())[pendingTransferKey(old)])
+      await resumeAll();
   }
 }
 
@@ -833,6 +1245,7 @@ async function registerConversation(tabId, profile) {
   const {key,record:old}=await currentRecord(tabId);
   if (!key) throw Error('Conversation changed; open the ChatGPT conversation again');
   const server=await serverForTab(tabId,old);
+  await assertNoPendingTransfer(old);
   const wasActive=!!old?.active;
   let record=old;
   if (record && (record.server || DEFAULT_SERVER)!==server)
@@ -856,19 +1269,45 @@ async function registerConversation(tabId, profile) {
     }
   }
   if (!record) {
-    // Only the extension's trusted service worker may read the admin token.
-    // New identities require explicit administrator authorization, while
-    // already-bound identities continue to reconnect with their own token.
     const secret=await adminToken(server);
     if(!secret)
-      throw Error('Для создания агента сначала авторизуй admin-token в расширении.');
-    const result=await adminRequest(server,secret,'/api/v1/agents/register',
-                                   'POST',{...profile,kind:'chatgpt'});
-    record={
-      ...profile,agentId:result.agent.agent_id,token:result.token,
-      chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
-      bootstrapMigrated:false,
-    };
+      throw Error('Для привязки агента сначала авторизуй admin-token в расширении.');
+    if(profile.agentId) {
+      if(Object.values(await storage()).some(other=>
+        other.agentId===profile.agentId && (other.server||DEFAULT_SERVER)===server))
+        throw Error('Агент уже привязан к другому чату. Используй перенос.');
+      const result=await adminRequest(
+        server,secret,'/api/v1/admin/agents/'+encodeURIComponent(profile.agentId)+
+        '/chat-credentials','POST',{chat_url:key,replace_existing:profile.rebind===true}
+      );
+      if(result.agent_id!==profile.agentId || !result.token_id ||
+         !result.token || result.agent?.agent_id!==profile.agentId)
+        throw Error('Сервер вернул неверную идентичность агента.');
+      record={
+        name:result.agent.name,role:result.agent.role,
+        purpose:result.agent.purpose,description:result.agent.description,
+        kind:result.agent.kind,teams:result.agent.teams,
+        agentId:result.agent_id,token:result.token,chatCredentialId:result.token_id,
+        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
+        bootstrapMigrated:false,
+      };
+    } else {
+      // Never inject a newly-created agent's permanent primary token into
+      // ChatGPT. The server creates identity + scoped chat credential together.
+      const result=await adminRequest(server,secret,'/api/v1/admin/chatgpt-agents',
+                                     'POST',{...profile,chat_url:key});
+      if(!result.agent?.agent_id || result.agent.kind!=='chatgpt' ||
+         !result.token || !result.token_id)
+        throw Error('Сервер не выдал токен привязки нового агента.');
+      record={
+        name:result.agent.name,role:result.agent.role,
+        purpose:result.agent.purpose,description:result.agent.description,
+        kind:'chatgpt',teams:result.agent.teams,
+        agentId:result.agent.agent_id,token:result.token,chatCredentialId:result.token_id,
+        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
+        bootstrapMigrated:false,
+      };
+    }
     created=true;
   }
 
@@ -900,7 +1339,7 @@ async function registerConversation(tabId, profile) {
     if (!record.bootstrapDone) {
       const tab=await conversationTab(tabId,key);
       const sent=await askTab(tabId,{
-        type:'agent:send',text:bootstrapPrompt(record),url:tab.url,
+        type:'agent:send',text:bootstrapPrompt(record,record.bootstrapMigrated===true),url:tab.url,
       });
       if(!sent?.ok)
         throw Error('Registered, but initialization prompt was not sent: '+(sent?.error||'unknown'));
@@ -923,7 +1362,7 @@ async function registerConversation(tabId, profile) {
     });
     await connect(tabId,record);
     await conversationTab(tabId,key);
-    return {agentId:record.agentId,name:record.name,created};
+    return {agentId:record.agentId,name:record.name,created:created&&!profile.agentId,linked:!!profile.agentId};
   } catch(error) {
     if(!wasActive || created) {
       // Do not leave an uninitialized or abandoned agent active. In
@@ -942,6 +1381,7 @@ async function updateToken(tabId, replacement) {
   const {key,record}=await currentRecord(tabId);
   if (!key || !record?.agentId)
     throw Error('Этот чат не привязан к агенту.');
+  await assertNoPendingTransfer(record);
   if (typeof replacement !== 'string' || replacement.length < 20 || replacement.length > 512)
     throw Error('Некорректный токен.');
   const tab=await conversationTab(tabId,key);
@@ -960,11 +1400,15 @@ async function updateToken(tabId, replacement) {
                              agent.name===record.name))
     throw Error('Токен не соответствует привязанному агенту.');
   await conversationTab(tabId,key);
+  if(replacement===record.token) return {updated:false,agentId:record.agentId};
+  // A manual credential replacement must not leave the old chat token live.
+  await revokeChatCredential(record);
   const updated=await updateRecords(entries=>{
     if(entries[key]?.agentId!==record.agentId ||
        entries[key]?.token!==record.token)
       throw Error('Привязка агента изменилась.');
     entries[key].token=replacement;
+    delete entries[key].chatCredentialId;
     return {...entries[key]};
   });
   // Replace the old PUSH connection immediately. No token is ever returned
@@ -978,6 +1422,7 @@ async function repeatBootstrap(tabId) {
   const {key,record}=await currentRecord(tabId);
   if (!key || !record?.agentId || !record?.token)
     throw Error('Этот чат не привязан к агенту. Сначала нажмите Старт.');
+  await assertNoPendingTransfer(record);
   const tab=await conversationTab(tabId,key);
   const result=await askTab(tabId,{
     // Reuse the original bootstrap variant for the bound conversation:
@@ -996,20 +1441,200 @@ async function repeatBootstrap(tabId) {
 async function stopAgent(tabId) {
   const {key,record}=await currentRecord(tabId);
   if (!record || !key) return {stopped:true};
+  await assertNoPendingTransfer(record);
   await updateRecords(records=>{
     if(records[key]?.agentId===record.agentId) records[key].active=false;
   });
   disconnect(record.ownerTabId);
   return {stopped:true};
 }
+// Entire scheduling feature is local to Chrome. No Notion or task-server API.
+const SCHEDULE_PREFIX='agent-network-schedule:';
+const SCHEDULE_INTERVALS=[5,15,30,60];
+const SCHEDULE_STORE='agentSchedulesById';
+let scheduleQueue=Promise.resolve();
+function scheduleLocked(action) {
+  const operation=scheduleQueue.catch(()=>{}).then(action);
+  scheduleQueue=operation.catch(()=>{});
+  return operation;
+}
+async function agentSchedules() {
+  return (await chrome.storage.local.get(SCHEDULE_STORE))[SCHEDULE_STORE] || {};
+}
+const scheduleKey=record=>normalizeServer(record.server||DEFAULT_SERVER)+'|'+record.agentId;
+const scheduleAlarm=key=>SCHEDULE_PREFIX+key;
+async function disableSchedule(record) {
+  const key=scheduleKey(record);
+  return scheduleLocked(async()=>{
+    const schedules=await agentSchedules();
+    if(schedules[key]) {
+      schedules[key]={...schedules[key],enabled:false};
+      await chrome.storage.local.set({[SCHEDULE_STORE]:schedules});
+    }
+    await chrome.alarms.clear(scheduleAlarm(key));
+  });
+}
+async function getSchedule(tabId) {
+  const {record}=await currentRecord(tabId);
+  if(!record?.agentId) return {schedule:null};
+  const schedules=await agentSchedules();
+  return {schedule:schedules[scheduleKey(record)] || null};
+}
+async function saveSchedule(tabId, options) {
+  const {record}=await currentRecord(tabId);
+  if(!record?.agentId) throw Error('Сначала привяжите агента к чату.');
+  await assertNoPendingTransfer(record);
+  const enabled=options?.enabled===true;
+  const intervalMinutes=Number(options?.intervalMinutes);
+  const text=typeof options?.text==='string'?options.text.trim():'';
+  if(!SCHEDULE_INTERVALS.includes(intervalMinutes))
+    throw Error('Выберите допустимый интервал расписания.');
+  if(text.length>4000 || (enabled && !text))
+    throw Error('Введите текст пробуждения (максимум 4000 символов).');
+  const key=scheduleKey(record);
+  return scheduleLocked(async()=>{
+    const schedules=await agentSchedules();
+    const old=schedules[key] || {};
+    const schedule={...old,enabled,intervalMinutes,text};
+    schedules[key]=schedule;
+    await chrome.storage.local.set({[SCHEDULE_STORE]:schedules});
+    if(enabled)
+      await chrome.alarms.create(scheduleAlarm(key),
+        {delayInMinutes:intervalMinutes,periodInMinutes:intervalMinutes});
+    else
+      await chrome.alarms.clear(scheduleAlarm(key));
+    return {schedule};
+  });
+}
+async function scheduleOutcome(key,state,reason) {
+  const at=Date.now();
+  await scheduleLocked(async()=>{
+    const schedules=await agentSchedules();
+    if(!schedules[key]) return;
+    schedules[key]={...schedules[key],lastAttempt:{at,state,reason}};
+    await chrome.storage.local.set({[SCHEDULE_STORE]:schedules});
+  });
+}
+async function runSchedule(key) {
+  let state='skipped',reason='Расписание отключено';
+  try {
+    const schedules=await agentSchedules();
+    const schedule=schedules[key];
+    if(!schedule?.enabled) return {sent:false,reason};
+    const entries=await storage();
+    const match=Object.entries(entries).find(([,r])=>r.agentId && scheduleKey(r)===key);
+    if(!match || !match[1].active || !match[1].bootstrapDone ||
+       migratingKeys.has(match[0])) {
+      reason='Агент не запущен или переносится';
+    } else {
+      const [key,record]=match;
+      const tabs=await chrome.tabs.query({url:'https://chatgpt.com/*'}).catch(()=>[]);
+      const owner=tabs.find(t=>t.id===record.ownerTabId && chatKey(t.url)===key)
+        || tabs.find(t=>chatKey(t.url)===key);
+      if(!owner) reason='Чат агента не открыт';
+      else {
+        await guardedWake(record.agentId,async()=>{
+          const readiness=await probe(owner.id,record);
+          if(readiness.state!=='idle')
+            throw Error('Чат не готов: '+readiness.state);
+          // Recheck configuration and identity after probe (which may await).
+          const latest=(await agentSchedules())[scheduleKey(record)];
+          const current=(await storage())[key];
+          if(!latest?.enabled || current?.agentId!==record.agentId ||
+             !current.active || !current.bootstrapDone || migratingKeys.has(key) ||
+             current.token!==record.token ||
+             scheduleKey(current)!==scheduleKey(record))
+            throw Error('Расписание или привязка изменились');
+          const tab=await chrome.tabs.get(owner.id);
+          if(chatKey(tab?.url)!==key) throw Error('Чат изменился');
+          const prompt=[
+            '[Agent Network schedule]',
+            'Agent name: '+current.name,
+            'agent_id: '+current.agentId,
+            'token: '+current.token,
+            'Follow your permanent instructions. Keep your token private.',
+            'Scheduled instruction:',
+            latest.text,
+          ].join('\n');
+          const result=await askTab(owner.id,{
+            type:'agent:send',text:prompt,url:tab.url,
+          });
+          if(!result?.ok) throw Error(result?.error||'Не удалось отправить сообщение');
+          state='sent';
+          reason='Пробуждение отправлено';
+        });
+      }
+    }
+  } catch(error) {
+    reason=String(error.message||error).slice(0,180);
+  }
+  await scheduleOutcome(key,state,reason);
+  return {sent:state==='sent',reason};
+}
+// Collapse overlapping manual/alarm invocations before the lifecycle lock.
+const scheduleRunLocks=new Map();
+function runScheduleExclusive(key) {
+  const pending=scheduleRunLocks.get(key);
+  if(pending) return Promise.resolve({sent:false,reason:'Пробуждение уже выполняется'});
+  const operation=lifecycle(()=>runSchedule(key));
+  scheduleRunLocks.set(key,operation);
+  void operation.then(
+    ()=>{if(scheduleRunLocks.get(key)===operation) scheduleRunLocks.delete(key);},
+    ()=>{if(scheduleRunLocks.get(key)===operation) scheduleRunLocks.delete(key);}
+  );
+  return operation;
+}
+async function runScheduleNow(tabId) {
+  const {record}=await currentRecord(tabId);
+  if(!record?.agentId) throw Error('Сначала привяжите агента к чату.');
+  return runScheduleExclusive(scheduleKey(record));
+}
+async function restoreSchedules() {
+  return scheduleLocked(async()=>{
+    const schedules=await agentSchedules();
+    const records=Object.values(await storage()).filter(r=>r?.agentId);
+    for(const [key,item] of Object.entries(schedules)) {
+      if(key.includes('|')) continue;
+      // Migrate v0.7 schedule keyed only by agentId to a server-scoped key.
+      const owners=records.filter(r=>r.agentId===key);
+      if(owners.length===1) {
+        const scoped=scheduleKey(owners[0]);
+        if(!schedules[scoped]) schedules[scoped]=item;
+      }
+      delete schedules[key];
+      await chrome.alarms.clear(scheduleAlarm(key));
+    }
+    await chrome.storage.local.set({[SCHEDULE_STORE]:schedules});
+    for(const [key,item] of Object.entries(schedules)) {
+      if(!item?.enabled || !SCHEDULE_INTERVALS.includes(item.intervalMinutes)) continue;
+      if(!records.some(r=>scheduleKey(r)===key)) {
+        schedules[key]={...item,enabled:false};
+        continue;
+      }
+      const name=scheduleAlarm(key);
+      const existing=await chrome.alarms.get(name);
+      if(!existing)
+        await chrome.alarms.create(name,{
+          delayInMinutes:item.intervalMinutes,periodInMinutes:item.intervalMinutes,
+        });
+    }
+    await chrome.storage.local.set({[SCHEDULE_STORE]:schedules});
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   (async () => {
     switch (message?.type) {
       case 'network:status': {
         const {key,record}=await currentRecord(message.tabId);
         const server=await serverForTab(message.tabId,record);
+        // Destination URL is private to trusted popup; content scripts
+        // receive no pending-transfer metadata.
+        const pending=!sender?.tab && record?.agentId
+          ? (await pendingChatTransfers())[pendingTransferKey(record)] : null;
         return {
           server,
+          pendingTransfer:pending ? {toChatUrl:pending.to} : null,
           entry:record && {
             agentId:record.agentId,name:record.name,role:record.role,
             purpose:record.purpose,description:record.description,
@@ -1037,6 +1662,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         if (!visible) throw Error('Не удалось показать панель в текущем чате.');
         return {visible:true};
       }
+      case 'network:schedule-get':
+      case 'network:schedule-set':
+      case 'network:schedule-run': {
+        if(sender?.tab) throw Error('Расписание доступно только из popup.');
+        if(message.type==='network:schedule-get') return getSchedule(message.tabId);
+        if(message.type==='network:schedule-set')
+          return saveSchedule(message.tabId,message.schedule);
+        return runScheduleNow(message.tabId);
+      }
       case 'network:available-agents':
         return lifecycle(()=>availableAgents(message.tabId,!sender?.tab));
       case 'network:admin-status':
@@ -1053,12 +1687,19 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         return adminSetTeams(message.tabId,message.teams);
       }
       case 'network:migration-preview':
+        if(sender?.tab) throw Error('Перенос доступен только из popup.');
         return migrationPreview(message.tabId,message.name,message.agentId);
       case 'network:migrate':
+        if(sender?.tab) throw Error('Перенос доступен только из popup.');
         return lifecycle(()=>migrateAgent(
           message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination
         ));
-      case 'network:start': return lifecycle(()=>startAgent(message.tabId, message.profile));
+      case 'network:unlink':
+        if(sender?.tab) throw Error('Отвязка доступна только из popup.');
+        return lifecycle(()=>unlinkAgent(message.tabId));
+      case 'network:start':
+        if(sender?.tab) throw Error('Привязка доступна только из popup.');
+        return lifecycle(()=>startAgent(message.tabId,message.profile));
       case 'network:repeat-bootstrap': {
         if(sender?.tab) throw Error('Повторная инициализация доступна только из popup.');
         return lifecycle(()=>repeatBootstrap(message.tabId));
@@ -1116,8 +1757,17 @@ chrome.tabs.onUpdated.addListener((tabId,changes) => {
 });
 chrome.alarms.create('agent-network-resume', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(a => {
-  if (a.name === 'agent-network-resume') void resumeAll();
+  if(a.name === 'agent-network-resume') void resumeAll();
+  if(a.name.startsWith(SCHEDULE_PREFIX))
+    void runScheduleExclusive(a.name.slice(SCHEDULE_PREFIX.length));
 });
-chrome.runtime.onStartup.addListener(() => void resumeAll());
-chrome.runtime.onInstalled.addListener(() => void resumeAll());
+chrome.runtime.onStartup.addListener(() => {
+  void resumeAll();
+  void restoreSchedules();
+});
+chrome.runtime.onInstalled.addListener(() => {
+  void resumeAll();
+  void restoreSchedules();
+});
 void resumeAll();
+void restoreSchedules();

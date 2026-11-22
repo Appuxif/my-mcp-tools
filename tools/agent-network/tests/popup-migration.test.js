@@ -12,7 +12,8 @@ const EXISTING={
   name:'Existing-Worker',role:'Developer',purpose:'Build apps',description:'3D + Python',
   agentId:'agent-uuid',chatUrl:SOURCE,active:true,
 };
-function createPopup({migrateFails=false,registered=false,agents=[EXISTING],deletedBound=false}={}) {
+function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
+  deletedBound=false,bindConflictOnce=false,legacyPrimary=false}={}) {
   const elements=new Map();
   const el=id=>{
     if(!elements.has(id)){
@@ -35,6 +36,7 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],dele
     active:true,agentId:'agent-uuid',bootstrapDone:true,
   }:null;
   let adminConfigured=false;
+  let schedule=null;
   let currentTeams=[{team_id:'default',name:'default'}];
   const secret='TEST_ADMIN_SECRET_'.repeat(4);
   const chrome={
@@ -49,6 +51,13 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],dele
         case 'network:available-agents':
           if(deletedBound && current) {current=null;return {ok:true,items:[],removedCurrent:true};}
           return {ok:true,items:current?[]:agents};
+        case 'network:schedule-get':
+          return {ok:true,schedule};
+        case 'network:schedule-set':
+          schedule={...msg.schedule};
+          return {ok:true,schedule};
+        case 'network:schedule-run':
+          return {ok:true,sent:true,reason:'Пробуждение отправлено'};
         case 'network:admin-status':
           return {ok:true,configured:adminConfigured,
                   teams:[{name:'default'},{name:'Dev'},{name:'QA'}],
@@ -68,17 +77,23 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],dele
           const agent=agents.find(a=>a.agentId===msg.agentId);
           if(!agent) return {ok:false,error:'Agent not found'};
           return {ok:true,migrate:true,agentId:agent.agentId,name:agent.name,
-            fromChatUrl:agent.chatUrl,toChatUrl:DEST,needsNewChat:true};
+            fromChatUrl:agent.chatUrl,toChatUrl:DEST,needsNewChat:true,
+            rotatesPrimary:legacyPrimary};
         }
         case 'network:migrate':
           if(migrateFails)return {ok:false,error:'Failed validation'};
           current={...EXISTING,active:true,bootstrapDone:true};
           return {ok:true,migrated:true,name:'Existing-Worker',agentId:'agent-uuid'};
+        case 'network:unlink':
+          current=null;
+          return {ok:true,unlinked:true};
         case 'network:repeat-bootstrap':
           return {ok:true,sent:true,agentId:current?.agentId};
         case 'network:update-token':
           return {ok:true,updated:true,agentId:current?.agentId};
         case 'network:start':
+          if(bindConflictOnce && !msg.profile.rebind)
+            return {ok:false,error:'Agent or chat already has an active binding'};
           current={...msg.profile,active:true,bootstrapDone:true};
           return {ok:true,created:true};
         default:return {ok:false,error:'Unexpected '+msg.type};
@@ -98,6 +113,7 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],dele
   };
   vm.runInNewContext(code,{document,chrome,URL,console,
     navigator:{clipboard:{async writeText(value){copied.push(value);}}},
+    confirm(){return true;},
   });
   const click=async id=>{
     const callback=el(id).listeners.click;
@@ -130,6 +146,20 @@ test('selecting existing local agent fills original profile, Start requires conf
   assert.match(ui.el('migration-description').textContent,/old-chat/);
   assert.equal(ui.messages.some(m=>m.type==='network:migrate'),false);
   assert.equal(ui.messages.some(m=>m.type==='network:start'),false);
+});
+
+test('legacy primary migration preview confirms automatic rotation, not manual Dashboard action',async()=>{
+  const ui=createPopup({legacyPrimary:true});
+  await ui.ready();
+  ui.setName('Existing-Worker');
+  await ui.click('start');
+  assert.match(ui.el('migration-description').textContent,
+               /автоматически отзовёт/);
+  assert.match(ui.el('migration-description').textContent,
+               /Другие клиенты со старым токеном потеряют доступ/);
+  await ui.click('confirm-migration');
+  assert.equal(ui.messages.filter(m=>m.type==='network:migrate').length,1);
+  assert.equal(ui.el('migration-confirm').hidden,true);
 });
 
 test('Confirm transfers selected existing agent without creating a new one',async()=>{
@@ -306,4 +336,84 @@ test('unbound popup hides agent ID and disables reminder',async()=>{
   assert.equal(ui.el('agent-id-row').hidden,true);
   assert.equal(ui.el('agent-token-row').hidden,true);
   assert.equal(ui.el('repeat-bootstrap').disabled,true);
+});
+
+test('popup can enable and disable per-agent scheduling and send a test wake',async()=>{
+  const ui=createPopup({registered:true});await ui.ready();
+  assert.equal(ui.el('schedule-section').hidden,false);
+  assert.equal(ui.el('schedule-enabled').checked,false);
+  ui.el('schedule-enabled').checked=true;
+  ui.el('schedule-interval').value='15';
+  ui.el('schedule-text').value='Check my assigned tasks';
+  await ui.click('schedule-save');
+  const save=ui.messages.find(m=>m.type==='network:schedule-set');
+  assert.equal(save.schedule.intervalMinutes,15);
+  assert.equal(save.schedule.enabled,true);
+  assert.equal(save.schedule.text,'Check my assigned tasks');
+  assert.equal(ui.el('schedule-run').disabled,false);
+  await ui.click('schedule-run');
+  assert.equal(ui.messages.some(m=>m.type==='network:schedule-run'),true);
+  assert.equal(ui.el('schedule-info').textContent,'Пробуждение отправлено');
+  ui.el('schedule-enabled').checked=false;
+  await ui.click('schedule-save');
+  assert.equal(ui.el('schedule-run').disabled,true);
+  assert.equal(ui.messages.filter(m=>m.type==='network:schedule-set').length,2);
+});
+
+test('unbound chat cannot configure a schedule',async()=>{
+  const ui=createPopup();await ui.ready();
+  assert.equal(ui.el('schedule-section').hidden,true);
+});
+
+test('dashboard-only agent is selected and bound without migration or new registration',async()=>{
+  const server={name:'Dashboard-Worker',role:'Developer',kind:'chatgpt',
+    purpose:'Debugging',description:'Already created on server',
+    agentId:'dashboard-uuid',chatUrl:null,active:false,source:'server'};
+  const ui=createPopup({agents:[server]});await ui.ready();
+  ui.setName(server.name);
+  assert.match(ui.el('agent-source').textContent,/будет выдан отдельный токен/);
+  await ui.click('start');
+  assert.equal(ui.messages.some(x=>x.type==='network:migration-preview'),false);
+  assert.equal(ui.messages.filter(x=>x.type==='network:start').length,1);
+  assert.equal(ui.messages.find(x=>x.type==='network:start').profile.agentId,'dashboard-uuid');
+});
+
+test('non-ChatGPT catalog entry cannot be bound to a ChatGPT conversation',async()=>{
+  const candidate={name:'Codex-Agent',role:'Developer',kind:'codex',
+    purpose:'',description:'',agentId:'codex-uuid',chatUrl:null};
+  const ui=createPopup({agents:[candidate]});await ui.ready();
+  ui.setName(candidate.name);
+  await ui.click('start');
+  assert.equal(ui.messages.some(m=>m.type==='network:start'),false);
+  assert.match(ui.el('status').textContent,/не предназначен для ChatGPT/);
+});
+
+test('popup manually refreshes the catalog and renders synchronization status',async()=>{
+  const ui=createPopup();await ui.ready();
+  const before=ui.messages.filter(m=>m.type==='network:available-agents').length;
+  await ui.click('refresh-agents');
+  const after=ui.messages.filter(m=>m.type==='network:available-agents').length;
+  assert.equal(after,before+1);
+  assert.match(ui.el('catalog-info').textContent,/Каталог/);
+});
+
+test('popup unlinks an existing agent only after confirmation',async()=>{
+  const ui=createPopup({registered:true});await ui.ready();
+  assert.equal(ui.el('unlink').disabled,false);
+  await ui.click('unlink');
+  assert.ok(ui.messages.some(m=>m.type==='network:unlink'));
+  assert.equal(ui.el('unlink').disabled,true);
+});
+
+test('popup requires human confirmation to reclaim a remotely bound agent',async()=>{
+  const candidate={name:'Unavailable-ChatGPT',role:'Developer',kind:'chatgpt',
+    purpose:'',description:'',agentId:'rebind-agent',chatUrl:null};
+  const ui=createPopup({agents:[candidate],bindConflictOnce:true});await ui.ready();
+  ui.setName(candidate.name);
+  await ui.click('start');
+  const requests=ui.messages.filter(m=>m.type==='network:start');
+  assert.equal(requests.length,2);
+  assert.equal(requests[0].profile.rebind,undefined);
+  assert.equal(requests[1].profile.rebind,true);
+  assert.equal(requests[1].profile.agentId,candidate.agentId);
 });

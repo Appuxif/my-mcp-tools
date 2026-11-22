@@ -73,8 +73,11 @@ function fillExisting() {
   if (candidate) {
     for(const field of ['role','purpose','description']) $(field).value=candidate[field]||'';
     for(const field of ['role','purpose','description']) $(field).disabled=true;
-    $('agent-source').textContent='Существующий агент · текущий чат: '+candidate.chatUrl+
-      ' · Профиль сохранится без изменений.';
+    $('agent-source').textContent=candidate.chatUrl
+      ? 'Локальный агент · текущий чат: '+candidate.chatUrl+' · Можно перенести.'
+      : candidate.kind==='chatgpt'
+        ? 'Агент сервера · при привязке будет выдан отдельный токен для этого чата.'
+        : 'Агент типа '+candidate.kind+' · к ChatGPT можно привязать только chatgpt.';
   } else {
     for(const field of ['role','purpose','description']) $(field).disabled=false;
     $('agent-source').textContent='Новое имя создаст агента после авторизации admin-token. Имя из списка перенесёт существующего.';
@@ -97,11 +100,27 @@ async function request(type, extra = {}) {
   if (!response?.ok) throw Error(response?.error || 'Ошибка расширения');
   return response;
 }
+async function refreshSchedule() {
+  const section=$('schedule-section');
+  section.hidden=!ownAgent?.agentId;
+  if(section.hidden) return;
+  const result=await request('network:schedule-get');
+  const schedule=result.schedule;
+  $('schedule-enabled').checked=!!schedule?.enabled;
+  $('schedule-interval').value=String(schedule?.intervalMinutes||5);
+  $('schedule-text').value=schedule?.text||'';
+  $('schedule-run').disabled=!schedule?.enabled || !ownAgent.active;
+  const last=schedule?.lastAttempt;
+  $('schedule-info').textContent=last
+    ? new Date(last.at).toLocaleString()+': '+last.reason
+    : 'Запусков пока не было.';
+}
 async function refresh() {
   try {
     const s = await request('network:status');
     $('server').value = s.server;
     $('show-hud').disabled = !s.entry;
+    $('unlink').disabled = !s.entry || !!s.pendingTransfer;
     $('repeat-bootstrap').disabled = !s.entry;
     $('agent-id-row').hidden = !s.entry;
     $('agent-token-row').hidden = !s.entry;
@@ -110,6 +129,11 @@ async function refresh() {
     const list=await request('network:available-agents');
     if(list.removedCurrent) return refresh(); // DB deletion invalidated this chat's old binding.
     updateOptions(list.items);
+    $('catalog-info').textContent=list.synced
+      ? '✓ Список синхронизирован с сервером.'
+      : list.syncError
+        ? 'Не удалось синхронизировать каталог: '+list.syncError
+        : 'Каталог сервера доступен после подключения admin-token.';
     if (s.entry) {
       for (const field of fields) $(field).value = s.entry[field] || '';
       for(const field of ['role','purpose','description']) $(field).disabled=false;
@@ -121,6 +145,10 @@ async function refresh() {
     }
     show(s.entry
       ? [s.entry.name + ' · ' + (s.entry.active ? 'включён' : 'остановлен'),
+         s.pendingTransfer
+           ? 'Перенос в '+s.pendingTransfer.toChatUrl+
+             ' ожидает подтверждения сервера. Токен исходного чата заблокирован.'
+           : '',
          'WebSocket: ' + (s.connected ? 'подключён' : 'отключён'),
          'Состояние: ' + (s.ui?.state || 'неизвестно'),
          'Сеть: ' + (s.ui?.network || 'нет данных') +
@@ -128,6 +156,7 @@ async function refresh() {
          s.entry.bootstrapDone ? '' : 'Требуется инициализация чата'].filter(Boolean).join('\n')
       : 'Этот чат пока не привязан к агенту. Выбери существующего по имени для переноса или создай нового.');
     await refreshAdmin();
+    await refreshSchedule();
   } catch (e) { show(String(e.message || e)); }
 }
 function parseServer(raw) {
@@ -158,6 +187,39 @@ document.addEventListener('DOMContentLoaded', async () => {
     show('Не удалось определить активную вкладку.');
     return;
   }
+  $('refresh-agents').addEventListener('click',async()=>{
+    $('refresh-agents').disabled=true;
+    try { await refresh(); }
+    catch(error) { $('catalog-info').textContent=String(error.message||error); }
+    finally { $('refresh-agents').disabled=false; }
+  });
+  $('schedule-save').addEventListener('click',async()=>{
+    $('schedule-save').disabled=true;
+    try {
+      await request('network:schedule-set',{schedule:{
+        enabled:$('schedule-enabled').checked,
+        intervalMinutes:Number($('schedule-interval').value),
+        text:$('schedule-text').value,
+      }});
+      await refreshSchedule();
+      $('schedule-info').textContent=$('schedule-enabled').checked
+        ? 'Расписание включено и сохранено.' : 'Расписание отключено.';
+    } catch(error) {
+      $('schedule-info').textContent='Ошибка: '+String(error.message||error);
+    } finally { $('schedule-save').disabled=false; }
+  });
+  $('schedule-run').addEventListener('click',async()=>{
+    $('schedule-run').disabled=true;
+    try {
+      const result=await request('network:schedule-run');
+      await refreshSchedule();
+      $('schedule-info').textContent=result.reason;
+    } catch(error) {
+      $('schedule-info').textContent='Ошибка: '+String(error.message||error);
+    } finally {
+      $('schedule-run').disabled=!ownAgent?.active || !$('schedule-enabled').checked;
+    }
+  });
   $('save-server').addEventListener('click', async () => {
     $('save-server').disabled = true;
     try {
@@ -270,21 +332,41 @@ document.addEventListener('DOMContentLoaded', async () => {
         throw Error('Имя нового агента не должно превышать 64 символа.');
       if(!candidate && knownAgents.some(agent=>agent.name===profile.name))
         throw Error('Выбери агента с конкретным Agent ID из списка.');
-      if(candidate) {
+      if(candidate?.chatUrl) {
         const preview=await request('network:migration-preview',{
           name:candidate.name,agentId:candidate.agentId,
         });
         confirmedPreview=preview;
         $('migration-description').textContent=
           'Перенести '+preview.name+' из '+preview.fromChatUrl+
-          ' в этот чат? Старый чат перестанет получать PUSH-сообщения.';
+          ' в этот чат? Старый чат перестанет получать PUSH-сообщения.'+
+          (preview.rotatesPrimary
+            ? '\nУ этого старого агента основной токен. При успешном переносе '+
+              'сервер автоматически отзовёт его и выдаст новый токен '+
+              'только этому чату. Другие клиенты со старым токеном потеряют доступ.'
+            : '');
         $('migration-confirm').hidden=false;
         show('Проверь перенос и нажми «Подтвердить перенос».');
         return;
       }
+      if(candidate && candidate.kind!=='chatgpt')
+        throw Error('Агент типа '+candidate.kind+' не предназначен для ChatGPT. Создай ChatGPT-агента в Dashboard.');
       cancelPreview();
-      show('Регистрирую агента…');
-      await request('network:start', {profile});
+      show(candidate?'Привязываю агента и получаю токен…':'Регистрирую агента…');
+      const toBind={
+        ...profile,...(candidate?{agentId:candidate.agentId}:{}),
+      };
+      try {
+        await request('network:start',{profile:toBind});
+      } catch(error) {
+        if(!candidate || !String(error.message||error).includes('active binding'))
+          throw error;
+        if(!confirm('Этот агент уже привязан к другому чату на сервере. '+
+          'Перепривязать его сюда? Прежний токен будет отозван, а PUSH '+
+          'в другом чате отключится.'))
+          throw Error('Перепривязка отменена.');
+        await request('network:start',{profile:{...toBind,rebind:true}});
+      }
       await refresh();
     } catch (e) { show(String(e.message || e)); }
     finally { $('start').disabled = false; }
@@ -326,6 +408,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     } finally {
       $('repeat-bootstrap').disabled=false;
     }
+  });
+  $('unlink').addEventListener('click',async()=>{
+    if(!ownAgent) return;
+    if(!confirm('Отвязать '+ownAgent.name+' от этого чата? PUSH остановится, а отдельный токен привязки будет отозван.')) return;
+    $('unlink').disabled=true;
+    try {
+      const result=await request('network:unlink');
+      await refresh();
+      show(result.legacyTokenNotRevoked
+        ? 'Агент отвязан. ВАЖНО: старая привязка использовала основной токен. '+
+          'Чтобы отозвать его, вручную перевыпусти токен в Dashboard.'
+        : 'Агент отвязан, токен чата отозван.');
+    } catch(error) {
+      show('Ошибка отвязки: '+String(error.message||error));
+    } finally { $('unlink').disabled=!ownAgent; }
   });
   $('stop').addEventListener('click', async () => {
     try { await request('network:stop'); await refresh(); }

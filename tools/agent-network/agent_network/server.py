@@ -12,6 +12,7 @@ import contextlib
 import functools
 import inspect
 import os
+import re
 import secrets
 import stat
 import logging
@@ -62,6 +63,27 @@ class AdminAgentCreate(BaseModel):
 class AgentInstructionsUpdate(BaseModel):
     instructions: str
     expected_revision: int
+
+
+class AgentChatCredentialRequest(BaseModel):
+    chat_url: str
+    replace_existing: bool = False
+
+
+class AgentChatTransferRequest(BaseModel):
+    source_token_id: str = ""
+    old_chat_url: str
+    new_chat_url: str
+    legacy_primary_token: str = ""
+    admin_recovery: bool = False
+
+
+class ExtensionChatAgentCreate(BaseModel):
+    name: str
+    role: str
+    purpose: str = ""
+    description: str = ""
+    chat_url: str
 
 
 class AgentProfile(BaseModel):
@@ -135,6 +157,7 @@ class Broker:
         self.store.prune_messages()
         self.store.prune_notes()
         self.store.prune_channels()
+        self.store.prune_chat_tokens()
         # Agent identities and compact context are deleted only by the admin.
         self.store.maintain_storage()
         self.last_maintenance = time.monotonic()
@@ -230,6 +253,7 @@ class Broker:
                 msg = await ws.receive_json()
                 event = msg.get("type")
                 if event == "ping":
+                    self.store.verify(agent_id, token)
                     self.store.update_channel(channel_id, msg.get("state", "unknown"))
                     await ws.send_json({"type": "pong"})
                 elif event == "wake_result":
@@ -733,6 +757,128 @@ def create_app(config: Config | None = None) -> FastAPI:
         secret = req.headers.get("x-agent-network-admin-token", "")
         if not secret or not secrets.compare_digest(secret, admin_token):
             raise HTTPException(403, "Invalid administrator token")
+
+    @app.get("/api/v1/admin/agents")
+    def extension_agent_catalog(req: Request) -> JSONResponse:
+        """Authoritative metadata for the trusted Chrome popup, no credentials."""
+        require_extension_admin(req)
+        items = [{
+            "agent_id": a["agent_id"], "name": a["name"], "kind": a["kind"],
+            "role": a["role"], "purpose": a["purpose"],
+            "description": a["description"], "teams": a["teams"],
+        } for a in store.agents()]
+        return JSONResponse({"items": items}, headers={"Cache-Control": "no-store"})
+
+    def validate_chat_url(url: str) -> None:
+        if not re.fullmatch(r"https://chatgpt[.]com/c/[a-zA-Z0-9-]{8,100}", url):
+            raise HTTPException(400, "Invalid ChatGPT conversation URL")
+
+    @app.post("/api/v1/admin/chatgpt-agents")
+    def extension_create_chatgpt_agent(body: ExtensionChatAgentCreate,
+                                       req: Request) -> JSONResponse:
+        """Create a new identity, returning only a revocable chat token."""
+        require_extension_admin(req)
+        validate_chat_url(body.chat_url)
+        try:
+            registered = store.register(
+                body.name, body.role, "chatgpt", body.purpose, body.description
+            )
+        except ValueError as exc:
+            raise HTTPException(409 if "already registered" in str(exc)
+                                else 400, str(exc)) from exc
+        agent_id = registered["agent"]["agent_id"]
+        try:
+            issued = store.issue_chat_token(agent_id, body.chat_url)
+        except Exception as exc:
+            store.delete_agent(agent_id)
+            if isinstance(exc, ValueError):
+                raise HTTPException(409, str(exc)) from exc
+            raise
+        return JSONResponse({**issued, "created": True},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/v1/admin/agents/{target_agent_id}/chat-credentials")
+    async def extension_issue_chat_credential(target_agent_id: str,
+                                              body: AgentChatCredentialRequest,
+                                              req: Request) -> JSONResponse:
+        """Admin-issued credential only when binding to an existing chat."""
+        require_extension_admin(req)
+        validate_chat_url(body.chat_url)
+        try:
+            issued = store.issue_chat_token(
+                target_agent_id, body.chat_url,
+                replace_existing=body.replace_existing,
+            )
+        except ValueError as exc:
+            raise HTTPException(404 if str(exc) == "Unknown agent_id"
+                                else 409 if ("active binding" in str(exc) or
+                                             "bound to another agent" in str(exc))
+                                else 400,
+                                str(exc)) from exc
+        if body.replace_existing:
+            # Reclaimed lease invalidates the previous wake channel immediately.
+            await broker.disconnect_agent(target_agent_id)
+        return JSONResponse(issued, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/admin/agents/{target_agent_id}/chat-binding")
+    def extension_get_chat_binding(target_agent_id: str, req: Request) -> JSONResponse:
+        """Metadata-only reconciliation after an ambiguous transfer response."""
+        require_extension_admin(req)
+        try:
+            binding = store.chat_binding(target_agent_id)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        return JSONResponse(binding, headers={"Cache-Control":"no-store"})
+
+    @app.post("/api/v1/admin/agents/{target_agent_id}/chat-transfers")
+    def extension_prepare_chat_transfer(target_agent_id: str,
+                                        body: AgentChatTransferRequest,
+                                        req: Request) -> JSONResponse:
+        require_extension_admin(req)
+        validate_chat_url(body.old_chat_url)
+        validate_chat_url(body.new_chat_url)
+        try:
+            prepared = store.prepare_chat_transfer(
+                target_agent_id, body.source_token_id,
+                body.old_chat_url, body.new_chat_url,
+                legacy_primary_token=body.legacy_primary_token,
+                admin_recovery=body.admin_recovery,
+            )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        return JSONResponse(prepared, headers={"Cache-Control":"no-store"})
+
+    @app.post("/api/v1/admin/agents/{target_agent_id}/chat-transfers/{transfer_id}/commit")
+    async def extension_commit_chat_transfer(target_agent_id: str,
+                                             transfer_id: str,
+                                             req: Request) -> JSONResponse:
+        require_extension_admin(req)
+        try:
+            committed = store.commit_chat_transfer(target_agent_id, transfer_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        # A's old credential is now revoked. Terminate its established WS.
+        await broker.disconnect_agent(target_agent_id)
+        return JSONResponse(committed, headers={"Cache-Control":"no-store"})
+
+    @app.delete("/api/v1/admin/agents/{target_agent_id}/chat-transfers/{transfer_id}")
+    def extension_abort_chat_transfer(target_agent_id: str,
+                                      transfer_id: str,
+                                      req: Request) -> JSONResponse:
+        require_extension_admin(req)
+        aborted = store.abort_chat_transfer(target_agent_id, transfer_id)
+        return JSONResponse({"aborted":aborted},
+                            headers={"Cache-Control":"no-store"})
+
+    @app.delete("/api/v1/admin/agents/{target_agent_id}/chat-credentials/{token_id}")
+    async def extension_revoke_chat_credential(target_agent_id: str, token_id: str,
+                                         req: Request) -> JSONResponse:
+        """Revoke a chat's token, leaving all other credentials alone."""
+        require_extension_admin(req)
+        revoked = store.revoke_chat_token(target_agent_id, token_id)
+        if revoked:
+            await broker.disconnect_agent(target_agent_id)
+        return JSONResponse({"revoked": revoked}, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/v1/admin/agent-ids")
     def extension_agent_ids(req: Request) -> JSONResponse:

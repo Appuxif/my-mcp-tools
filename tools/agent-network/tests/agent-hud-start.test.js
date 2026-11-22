@@ -74,10 +74,10 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
   const fetch=async (url,options)=>{
     assert.equal(options.method,'POST');
     events.push({kind:'fetch',url});
-    if(url.endsWith('/api/v1/agents/register')) {
+    if(url.endsWith('/api/v1/admin/chatgpt-agents')) {
       assert.equal(options.headers['X-Agent-Network-Admin-Token'],ADMIN_SECRET);
       if(registrationError)return {ok:false,status:503,async json(){return {detail:'Unavailable'}}};
-      return {ok:true,status:200,async json(){return {agent:{agent_id:'a1'},token:'SECRET_NOT_FOR_HUD'}}};
+      return {ok:true,status:200,async json(){return {agent:{agent_id:'a1',kind:'chatgpt',name:'Alice',role:'Developer',purpose:'Tests',description:'',teams:[]},token:'SECRET_NOT_FOR_HUD',token_id:'test-token-id'}}};
     }
     if(url.endsWith('/api/v1/agents/profile')) {
       return {ok:true,status:200,async json(){return {agent_id:'a1'}}};
@@ -94,9 +94,9 @@ function startHarness({hudInstalled=true,registrationError=false,existing=false}
   });
   vm.runInContext(SOURCE,context);
   const request=message=>new Promise(resolve=>onMessage(message,{tab},resolve));
-  const start=()=>request({type:'network:start',tabId:7,profile:{
+  const start=()=>new Promise(resolve=>onMessage({type:'network:start',tabId:7,profile:{
     name:'Alice',role:'Developer',purpose:'Tests',description:'',
-  }});
+  }},{},resolve));
   return {events,data,start,request};
 }
 

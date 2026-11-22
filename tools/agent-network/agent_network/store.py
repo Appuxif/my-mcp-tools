@@ -16,6 +16,7 @@ from .mcp_debug import is_secret_field, redact
 
 MESSAGE_TTL_SECONDS = 24 * 60 * 60
 NOTE_TTL_SECONDS = 48 * 60 * 60
+CHAT_TOKEN_IDLE_SECONDS = 30 * 24 * 60 * 60
 MAX_NOTE_BYTES = 128 * 1024
 MAX_SUBNOTES = 100
 MAX_CONTEXT_BYTES = 128 * 1024
@@ -116,6 +117,29 @@ class Store:
                     last_wake_result TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS channels_agent ON channels(agent_id, connected);
+                -- Revocable per-chat credentials, separate from the agent's
+                -- original primary token. Only hashes are ever persisted.
+                CREATE TABLE IF NOT EXISTS agent_chat_tokens (
+                    token_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    chat_url TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    last_used_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS chat_tokens_agent ON agent_chat_tokens(agent_id);
+                -- Staged migration credentials are NOT accepted by verify().
+                -- The source remains authorized until an acknowledged bootstrap
+                -- commits the transfer. Aborts never expose a live token to B.
+                CREATE TABLE IF NOT EXISTS agent_chat_transfers (
+                    transfer_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL UNIQUE REFERENCES agents(agent_id) ON DELETE CASCADE,
+                    source_token_id TEXT NOT NULL,
+                    source_chat_url TEXT NOT NULL,
+                    dest_chat_url TEXT NOT NULL UNIQUE,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    created_at REAL NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS teams (
                     team_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE COLLATE NOCASE
@@ -162,6 +186,23 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS subnotes_parent ON subnotes(note_id);
             """)
+            chat_columns = {row["name"] for row in self.db.execute(
+                "PRAGMA table_info(agent_chat_tokens)")}
+            if "chat_url" not in chat_columns:
+                self.db.execute("ALTER TABLE agent_chat_tokens ADD COLUMN "
+                                "chat_url TEXT NOT NULL DEFAULT ''")
+            if "last_used_at" not in chat_columns:
+                self.db.execute("ALTER TABLE agent_chat_tokens ADD COLUMN "
+                                "last_used_at REAL NOT NULL DEFAULT 0")
+                self.db.execute("UPDATE agent_chat_tokens SET last_used_at=created_at")
+            # Old beta credentials lacked chat ownership; force a safe rebind.
+            self.db.execute("DELETE FROM agent_chat_tokens WHERE chat_url=''")
+            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS chat_tokens_agent_unique "
+                            "ON agent_chat_tokens(agent_id)")
+            self.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS chat_tokens_chat_unique "
+                            "ON agent_chat_tokens(chat_url)")
+            # PRAGMA foreign_keys cannot be enabled inside an open transaction.
+            self.db.commit()
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.execute(
                 "INSERT OR IGNORE INTO teams(team_id, name) VALUES ('default', 'default')"
@@ -398,6 +439,15 @@ class Store:
                     "deleted_context": bool(contexts),
                     "deleted_instructions": bool(instructions),
                     "deleted_notes": notes}
+
+    def prune_chat_tokens(self, *, at: float | None = None) -> int:
+        """Expire orphaned leases and abandoned provisional transfers."""
+        with self.lock, self.db:
+            self._prune_chat_transfers()
+            return self.db.execute(
+                "DELETE FROM agent_chat_tokens WHERE last_used_at<=?",
+                ((at or now()) - CHAT_TOKEN_IDLE_SECONDS,),
+            ).rowcount
 
     def prune_channels(self, *, at: float | None = None) -> int:
         """Discard old disconnected wake-channel sessions (not registered agents)."""
@@ -896,9 +946,268 @@ class Store:
     def verify(self, agent_id: str, token: str) -> sqlite3.Row:
         with self.lock:
             row = self._agent(agent_id)
-            if not token or not secrets.compare_digest(row["token_hash"], digest(token)):
+            if not token:
                 raise PermissionError("Invalid agent token")
+            hashed = digest(token)
+            if not secrets.compare_digest(row["token_hash"], hashed):
+                scoped = self.db.execute(
+                    "SELECT token_id FROM agent_chat_tokens WHERE "
+                    "agent_id=? AND token_hash=? AND last_used_at>?",
+                    (agent_id, hashed, now() - CHAT_TOKEN_IDLE_SECONDS),
+                ).fetchone()
+                if scoped is None:
+                    raise PermissionError("Invalid agent token")
+                with self.db:
+                    self.db.execute(
+                        "UPDATE agent_chat_tokens SET last_used_at=? WHERE token_id=?",
+                        (now(), scoped["token_id"]),
+                    )
             return row
+
+    def issue_chat_token(self, agent_id: str, chat_url: str,
+                         *, replace_existing: bool = False) -> dict:
+        """Issue one revocable credential; explicit reclaim rotates the old."""
+        with self.lock, self.db:
+            agent = self._agent(agent_id)
+            if agent["kind"] != "chatgpt":
+                raise ValueError("Only ChatGPT agents can be bound to ChatGPT")
+            self.db.execute(
+                "DELETE FROM agent_chat_tokens WHERE last_used_at<=?",
+                (now() - CHAT_TOKEN_IDLE_SECONDS,),
+            )
+            self._prune_chat_transfers()
+            if self.db.execute(
+                "SELECT 1 FROM agent_chat_transfers "
+                "WHERE agent_id=? OR dest_chat_url=?",
+                (agent_id, chat_url),
+            ).fetchone():
+                raise ValueError("Agent or chat has an in-progress transfer")
+            foreign = self.db.execute(
+                "SELECT agent_id FROM agent_chat_tokens WHERE chat_url=?",
+                (chat_url,),
+            ).fetchone()
+            if foreign and foreign["agent_id"] != agent_id:
+                raise ValueError("Chat is bound to another agent")
+            current = self.db.execute(
+                "SELECT token_id FROM agent_chat_tokens WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            if current and not replace_existing:
+                raise ValueError("Agent or chat already has an active binding")
+            if current:
+                self.db.execute(
+                    "DELETE FROM agent_chat_tokens WHERE token_id=?",
+                    (current["token_id"],),
+                )
+            secret = secrets.token_urlsafe(32)
+            token_id = opaque_id()
+            stamp = now()
+            self.db.execute(
+                "INSERT INTO agent_chat_tokens"
+                "(token_id,agent_id,token_hash,chat_url,created_at,last_used_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (token_id, agent_id, digest(secret), chat_url, stamp, stamp),
+            )
+            agent_public = self._public(agent)
+            return {"agent_id":agent_id, "token_id":token_id,
+                    "token":secret, "agent":{key: agent_public[key] for key in (
+                        "agent_id", "name", "kind", "role",
+                        "purpose", "description", "teams")}}
+
+    def _prune_chat_transfers(self) -> None:
+        self.db.execute(
+            "DELETE FROM agent_chat_transfers WHERE created_at<=?",
+            (now() - 10 * 60,),
+        )
+
+    def prepare_chat_transfer(self, agent_id: str, source_token_id: str,
+                              old_chat_url: str, new_chat_url: str,
+                              *, legacy_primary_token: str = "",
+                              admin_recovery: bool = False) -> dict:
+        """Reserve the destination and return an INACTIVE bearer for bootstrap."""
+        if old_chat_url == new_chat_url:
+            raise ValueError("Source and destination must be different")
+        with self.lock, self.db:
+            self._prune_chat_transfers()
+            if admin_recovery:
+                # A stale browser credential is not an authorization failure
+                # for an authenticated admin. The CURRENT server lease is
+                # authoritative; preserve it until commit, then rotate it.
+                if legacy_primary_token or source_token_id:
+                    raise ValueError("Invalid administrator recovery source")
+                agent = self._agent(agent_id)
+                if agent["kind"] != "chatgpt":
+                    raise ValueError("Only ChatGPT agents can be transferred")
+                current = self.db.execute(
+                    "SELECT token_id,chat_url FROM agent_chat_tokens WHERE agent_id=?",
+                    (agent_id,),
+                ).fetchone()
+                if current is not None:
+                    source_token_id = current["token_id"]
+                    old_chat_url = current["chat_url"]
+                else:
+                    # Old primary may already have been rotated; rotate the
+                    # CURRENT primary atomically when the destination commits.
+                    source_token_id = "primary:" + agent["token_hash"]
+            elif legacy_primary_token:
+                # v0.7 and earlier injected the identity's permanent primary
+                # bearer into ChatGPT. Never copy it to another chat. Reserve
+                # a fresh INACTIVE scoped destination bearer, then atomically
+                # rotate that old primary only when the bootstrap succeeds.
+                agent = self._agent(agent_id)
+                if agent["kind"] != "chatgpt" or source_token_id:
+                    raise ValueError("Invalid legacy transfer source")
+                hashed = digest(legacy_primary_token)
+                if not secrets.compare_digest(agent["token_hash"], hashed):
+                    raise ValueError("Legacy primary credential changed")
+                if self.db.execute(
+                    "SELECT 1 FROM agent_chat_tokens WHERE agent_id=?",
+                    (agent_id,),
+                ).fetchone():
+                    raise ValueError("Agent already has a scoped chat binding")
+                source_token_id = "primary:" + hashed
+            else:
+                source = self.db.execute(
+                    "SELECT token_id FROM agent_chat_tokens "
+                    "WHERE agent_id=? AND token_id=? AND chat_url=?",
+                    (agent_id, source_token_id, old_chat_url),
+                ).fetchone()
+                if source is None:
+                    raise ValueError("Source binding not found or token changed")
+            if self.db.execute(
+                "SELECT 1 FROM agent_chat_transfers "
+                "WHERE source_chat_url=? AND agent_id<>?",
+                (old_chat_url, agent_id),
+            ).fetchone():
+                raise ValueError("Source chat already has an in-progress transfer")
+            if self.db.execute(
+                "SELECT 1 FROM agent_chat_tokens WHERE chat_url=?",
+                (new_chat_url,),
+            ).fetchone():
+                raise ValueError("Destination chat already bound")
+            if self.db.execute(
+                "SELECT 1 FROM agent_chat_transfers "
+                "WHERE agent_id=? OR dest_chat_url=?",
+                (agent_id, new_chat_url),
+            ).fetchone():
+                raise ValueError("Agent or destination has an in-progress transfer")
+            transfer_id = opaque_id()
+            pending_token = secrets.token_urlsafe(32)
+            self.db.execute(
+                "INSERT INTO agent_chat_transfers "
+                "(transfer_id,agent_id,source_token_id,source_chat_url,"
+                "dest_chat_url,token_hash,created_at) VALUES(?,?,?,?,?,?,?)",
+                (transfer_id, agent_id, source_token_id, old_chat_url,
+                 new_chat_url, digest(pending_token), now()),
+            )
+            return {"agent_id":agent_id, "transfer_id":transfer_id,
+                    "token_id":transfer_id, "token":pending_token,
+                    "chat_url":new_chat_url, "status":"prepared",
+                    "admin_recovery":admin_recovery}
+
+    def commit_chat_transfer(self, agent_id: str, transfer_id: str) -> dict:
+        """Atomically activate B's bearer and invalidate A's bearer."""
+        with self.lock, self.db:
+            self._prune_chat_transfers()
+            pending = self.db.execute(
+                "SELECT * FROM agent_chat_transfers "
+                "WHERE agent_id=? AND transfer_id=?",
+                (agent_id, transfer_id),
+            ).fetchone()
+            if pending is None:
+                raise ValueError("Chat transfer missing or expired")
+            legacy = pending["source_token_id"].startswith("primary:")
+            if legacy:
+                agent = self._agent(agent_id)
+                # Check the *exact* primary used when the transfer was
+                # prepared: an admin rotation invalidates the staged token.
+                if not secrets.compare_digest(
+                    agent["token_hash"], pending["source_token_id"][8:]
+                ):
+                    raise ValueError("Legacy primary credential changed")
+                if self.db.execute(
+                    "SELECT 1 FROM agent_chat_tokens WHERE agent_id=?",
+                    (agent_id,),
+                ).fetchone():
+                    raise ValueError("Agent acquired a new scoped binding")
+            else:
+                current = self.db.execute(
+                    "SELECT 1 FROM agent_chat_tokens "
+                    "WHERE agent_id=? AND token_id=? AND chat_url=?",
+                    (agent_id, pending["source_token_id"], pending["source_chat_url"]),
+                ).fetchone()
+                if current is None:
+                    raise ValueError("Source binding changed during transfer")
+            if self.db.execute(
+                "SELECT 1 FROM agent_chat_tokens WHERE chat_url=?",
+                (pending["dest_chat_url"],),
+            ).fetchone():
+                raise ValueError("Destination chat already bound")
+            if legacy:
+                # One atomic transaction rotates away the primary credential
+                # embedded in chat A, and authorizes only chat B's fresh scoped
+                # bearer. Preserve the agent ID, history, teams and context.
+                self.db.execute(
+                    "UPDATE agents SET token_hash=?,updated_at=? WHERE agent_id=?",
+                    (digest(secrets.token_urlsafe(32)), now(), agent_id),
+                )
+                stamp = now()
+                self.db.execute(
+                    "INSERT INTO agent_chat_tokens "
+                    "(token_id,agent_id,token_hash,chat_url,created_at,last_used_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (transfer_id, agent_id, pending["token_hash"],
+                     pending["dest_chat_url"], stamp, stamp),
+                )
+            else:
+                self.db.execute(
+                    "UPDATE agent_chat_tokens "
+                    "SET token_id=?,token_hash=?,chat_url=?,created_at=?,last_used_at=? "
+                    "WHERE agent_id=? AND token_id=?",
+                    (transfer_id, pending["token_hash"], pending["dest_chat_url"],
+                     now(), now(), agent_id, pending["source_token_id"]),
+                )
+            self.db.execute(
+                "DELETE FROM agent_chat_transfers WHERE transfer_id=?",
+                (transfer_id,),
+            )
+            return {"agent_id":agent_id, "token_id":transfer_id,
+                    "chat_url":pending["dest_chat_url"], "status":"committed"}
+
+    def chat_binding(self, agent_id: str) -> dict:
+        """Read authoritative lease metadata without disclosing credentials."""
+        with self.lock:
+            self._agent(agent_id)
+            row = self.db.execute(
+                "SELECT token_id,chat_url FROM agent_chat_tokens WHERE agent_id=?",
+                (agent_id,),
+            ).fetchone()
+            return {"agent_id":agent_id, "token_id":row["token_id"] if row else None,
+                    "chat_url":row["chat_url"] if row else None}
+
+    def abort_chat_transfer(self, agent_id: str, transfer_id: str) -> bool:
+        """Discard an inactive transfer credential, preserving A's bearer."""
+        with self.lock, self.db:
+            return bool(self.db.execute(
+                "DELETE FROM agent_chat_transfers "
+                "WHERE agent_id=? AND transfer_id=?",
+                (agent_id, transfer_id),
+            ).rowcount)
+
+    def revoke_chat_token(self, agent_id: str, token_id: str) -> bool:
+        """Revoke this chat credential and any transfer staged from it."""
+        with self.lock, self.db:
+            revoked = bool(self.db.execute(
+                "DELETE FROM agent_chat_tokens WHERE agent_id=? AND token_id=?",
+                (agent_id, token_id),
+            ).rowcount)
+            if revoked:
+                self.db.execute(
+                    "DELETE FROM agent_chat_transfers "
+                    "WHERE agent_id=? AND source_token_id=?",
+                    (agent_id, token_id),
+                )
+            return revoked
 
     def rotate_agent_token(self, agent_id: str) -> dict:
         """Explicit admin action; old credentials immediately stop working.
@@ -913,6 +1222,11 @@ class Store:
                 "UPDATE agents SET token_hash=?, updated_at=? WHERE agent_id=?",
                 (digest(secret), now(), agent_id),
             )
+            # Security rotation also invalidates all pending destination
+            # credentials; neither a delayed commit nor a stale bootstrap
+            # may regain agent access using a pre-rotation token.
+            self.db.execute("DELETE FROM agent_chat_transfers WHERE agent_id=?", (agent_id,))
+            self.db.execute("DELETE FROM agent_chat_tokens WHERE agent_id=?", (agent_id,))
             return {"agent_id": agent_id, "name": row["name"],
                     "kind": row["kind"], "token": secret}
 

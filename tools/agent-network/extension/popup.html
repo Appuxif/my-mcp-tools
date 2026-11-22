@@ -15,9 +15,9 @@ h1{font-size:17px;letter-spacing:.025em;margin:0;font-weight:700}
 .section{background:#121f31;border:1px solid #293c53;border-radius:11px;padding:13px;margin-bottom:13px}
 .section-title{font-size:10px;letter-spacing:.14em;font-weight:800;color:#53dccc;margin-bottom:8px}
 label{display:block;margin:10px 0 4px;font-size:11px;color:#b7c8df}
-input,textarea{font:inherit;color:#eaf1fc;width:100%;padding:9px 10px;background:#0d1827;border:1px solid #374c63;border-radius:7px;outline:none}
-input:focus,textarea:focus{border-color:#4dd9d1;box-shadow:0 0 0 2px #43d9d120}
-input:disabled{opacity:.6}
+input,textarea,select{font:inherit;color:#eaf1fc;width:100%;padding:9px 10px;background:#0d1827;border:1px solid #374c63;border-radius:7px;outline:none}
+input:focus,textarea:focus,select:focus{border-color:#4dd9d1;box-shadow:0 0 0 2px #43d9d120}
+input:disabled,select:disabled,textarea:disabled{opacity:.6}
 textarea{height:59px;resize:vertical}
 button{border:1px solid transparent;color:white;border-radius:7px;padding:9px 12px;cursor:pointer;font:600 12px system-ui}
 button:focus-visible{outline:2px solid #53dccc}
@@ -43,7 +43,7 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 .team-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
 .team-chip{background:#193a48;color:#bfebe4;border:1px solid #38766b;padding:5px 8px;font-size:11px}
 .team-chip:disabled{opacity:1;cursor:default}
-.admin-line{color:#a3b8cb;font-size:11px;margin-top:8px;white-space:pre-wrap}
+.schedule-toggle{display:flex;align-items:center;gap:9px;margin:8px 0}.schedule-toggle input{width:auto}\n.admin-line{color:#a3b8cb;font-size:11px;margin-top:8px;white-space:pre-wrap}
 
 </style>
 </head>
@@ -63,9 +63,11 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 
 <section class="section">
 <div class="section-title">АГЕНТ · ЭТОТ ЧАТ</div>
-<label for="name">Имя</label><input id="name" maxlength="167" list="known-agents" autocomplete="off" placeholder="Выбери агента или введи новое имя">
+<div class="agent-actions"><label for="name" style="flex:1">Имя</label><button class="ghost" id="refresh-agents" type="button">↻ Обновить список</button></div>
+<input id="name" maxlength="167" list="known-agents" autocomplete="off" placeholder="Выбери агента или введи новое имя">
 <datalist id="known-agents"></datalist>
-<small id="agent-source" class="hint">Можно выбрать уже зарегистрированного агента для переноса в этот чат.</small>
+<small id="catalog-info" class="hint"></small>
+<small id="agent-source" class="hint">Можно выбрать агента сервера для привязки или локального агента для переноса.</small>
 <div id="agent-id-row" hidden>
   <label for="agent-id">Agent ID</label>
   <div class="team-actions">
@@ -84,7 +86,7 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 <label for="role">Роль</label><input id="role" maxlength="120" placeholder="Frontend developer">
 <label for="purpose">Назначение</label><input id="purpose" maxlength="1000" placeholder="Работа над интерфейсом">
 <label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
-<div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button></div>
+<div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button><button class="ghost" id="unlink" disabled>Отвязать</button></div>
 <div class="agent-actions"><button class="secondary" id="repeat-bootstrap" disabled
   title="Повторно отправить агенту его идентичность и инструкции MCP">↻ Напомнить агенту контекст</button></div>
 <div id="migration-confirm" class="transfer-review" hidden role="group" aria-labelledby="migration-title">
@@ -98,6 +100,30 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 </div>
 <div class="agent-actions"><button class="ghost" id="show-hud" disabled>◈ Показать плавающее окно</button></div>
 <small class="hint">Агент привязан к ID беседы, а не вкладке: при открытии этого чата в другой вкладке имя и настройки сохраняются. Плавающее окно открывается только этой кнопкой.</small>
+</section>
+
+<section class="section" id="schedule-section" hidden>
+  <div class="section-title">РАСПИСАНИЕ · ЭТОТ АГЕНТ</div>
+  <label class="schedule-toggle"><input type="checkbox" id="schedule-enabled">
+    Включить периодическое пробуждение</label>
+  <label for="schedule-interval">Повторять</label>
+  <select id="schedule-interval">
+    <option value="5">Каждые 5 минут</option>
+    <option value="15">Каждые 15 минут</option>
+    <option value="30">Каждые 30 минут</option>
+    <option value="60">Каждый час</option>
+  </select>
+  <label for="schedule-text">Текст для агента</label>
+  <textarea id="schedule-text" maxlength="4000" style="height:92px"
+    placeholder="Прочитай инструкции, проверь свободных агентов и бэклог Notion, назначь задачи, проверь зависшие…"></textarea>
+  <div class="agent-actions">
+    <button class="primary" id="schedule-save">Сохранить</button>
+    <button class="secondary" id="schedule-run">Проверить сейчас</button>
+  </div>
+  <div id="schedule-info" class="admin-line" role="status"></div>
+  <small class="hint">Работает, пока открыт Chrome и чат агента. Пропускает занятой чат
+  и черновики, повторяет попытку в следующем интервале.
+  «Стоп» агента приостанавливает отправку.</small>
 </section>
 
 <section class="section" id="admin-section">

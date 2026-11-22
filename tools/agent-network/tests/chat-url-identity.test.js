@@ -13,15 +13,22 @@ const ADMIN_TEST_TOKEN='TEST_ADMIN_SECRET_'.repeat(4);
 
 function networkHarness({
   legacy=null,initial=null,urls=[PROJECT,PLAIN],
-  newChatCreatesId=true,failMigrationSend=false,verifyFails=false,
+  newChatCreatesId=true,failMigrationSend=false,failTransferBootstrap=false,
+  transferConflict=false,failTransferCommit=false,ambiguousTransferCommit=false,
+  commitDuringAbort=false,abortRecheckUnavailable=false,reconcileUnavailable=false,primerBusyProbes=0,primerNeverIdle=false,
+  initialBusyProbes=0,probeDraftAfterPrimer=false,initialPending=null,
+  remoteCommittedTransfer=null,remoteForeignLease=null,verifyFails=false,
+  bindForeignDuringLegacyHud=false,
   registrationDelay=0,sendDelay=0,socketStartsOpen=true,noAdmin=false,
-  rotatedToken=null,remoteAgentIds=null,registryFails=false,networkDown=false,
+  rotatedToken=null,remoteAgentIds=null,remoteProfiles=[],registryFails=false,networkDown=false,
+  remoteBindConflict=false,
 }={}) {
   const data = {
     agentsByChat:initial || {},
     agentsByTab:legacy || {},
     defaultServer:'http://127.0.0.1:8787',
     serverByTab:{},
+    ...(initialPending ? {pendingChatTransfers:initialPending} : {}),
     ...(noAdmin ? {} : {adminTokenByServer:{'http://127.0.0.1:8787':ADMIN_TEST_TOKEN}}),
   };
   const tabs = new Map(urls.map((url,i)=>[i+10,{id:i+10,url}]));
@@ -29,10 +36,18 @@ function networkHarness({
   const adminTeamMembership=new Map();
   let storageAccessLevel=null;
   let nextIntervalId=1;
+  let remainingBusyProbes=initialBusyProbes;
+  let primerSubmitted=false;
+  let bindingLookupDown=reconcileUnavailable;
+  let remoteLeaseCleared=false;
+  let remoteAgentDeleted=false;
+  let foreignLease=remoteForeignLease;
+  let foreignLeaseAfterAbort=null;
+  let hudRequests=0;
   const hook=name=>({addListener(fn){listeners[name]=fn;}});
   const chrome={
     webRequest:{onBeforeRequest:hook('before'),onCompleted:hook('done'),onErrorOccurred:hook('failed')},
-    alarms:{create(){},onAlarm:hook('alarm')},
+    alarms:{create(){},async clear(){return true;},onAlarm:hook('alarm')},
     runtime:{
       onStartup:hook('startup'),onInstalled:hook('installed'),
       onMessage:hook('message')
@@ -44,12 +59,23 @@ function networkHarness({
       async sendMessage(tabId,message){
         events.push({kind:'tabMessage',tabId,type:message.type,body:message});
         switch(message.type) {
-          case 'agent:probe':return {state:'idle'};
+          case 'agent:probe':
+            if(probeDraftAfterPrimer && primerSubmitted)
+              return {state:'draft',reason:'composer contains user text'};
+            if(remainingBusyProbes>0) {
+              remainingBusyProbes--;
+              return {state:'busy',reason:'stop-generation control'};
+            }
+            return {state:'idle'};
           case 'agent:send': {
             if(sendDelay) await new Promise(resolve=>setTimeout(resolve,sendDelay));
             if (message.allowNewChat && failMigrationSend)
               return {ok:false,error:'Composer is busy'};
+            if (failTransferBootstrap && message.text?.includes('FRESH_DEST_TOKEN_FOR_'))
+              return {ok:false,error:'Destination composer rejected bootstrap'};
             if(message.allowNewChat && newChatCreatesId) {
+              primerSubmitted=true;
+              remainingBusyProbes=primerNeverIdle?Infinity:primerBusyProbes;
               const next='https://chatgpt.com/c/00000000-0000-0000-0000-000000000999';
               tabs.get(Number(tabId)).url=next;
               listeners.updated(Number(tabId),{url:next});
@@ -105,9 +131,118 @@ function networkHarness({
     }
   }
   let created=0;
+  let delayedCommit=false;
+  let legacyPrimaryValid=true;
+  let legacyStatusUnavailable=false;
+  let committedTransfer=remoteCommittedTransfer;
   const fetch=async (url,options)=>{
-    events.push({kind:'http',url,method:options.method});
+    events.push({kind:'http',url,method:options.method,body:options.body});
     if(networkDown) throw Error('Server unreachable');
+    if(url.endsWith('/chat-binding') && options.method==='GET'){
+      if(bindingLookupDown)
+        return {ok:false,status:503,async json(){return {detail:'Lookup temporarily unavailable'}}};
+      if(remoteAgentDeleted)
+        return {ok:false,status:404,async json(){return {detail:'Unknown agent_id'}}};
+      const id=url.split('/agents/')[1].split('/chat-binding')[0];
+      if(foreignLease)
+        return {ok:true,status:200,async json(){return foreignLease}};
+      if(remoteLeaseCleared)
+        return {ok:true,status:200,async json(){return {
+          agent_id:id,token_id:null,chat_url:null,
+        }}};
+      const current=Object.entries(data.agentsByChat)
+        .find(([,record])=>record.agentId===id);
+      return {ok:true,status:200,async json(){return committedTransfer||{
+        agent_id:id,token_id:current?.[1]?.chatCredentialId||null,
+        chat_url:current?.[1]?.chatCredentialId?current[0]:null,
+      }}};
+    }
+    if(url.includes('/chat-transfers')) {
+      const id=url.split('/agents/')[1].split('/chat-transfers')[0];
+      const transfer='transfer-'+id;
+      if(url.endsWith('/chat-transfers') && options.method==='POST'){
+        if(transferConflict)
+          return {ok:false,status:409,async json(){return {detail:'Destination chat already bound'}}};
+        const body=JSON.parse(options.body);
+        if(body.legacy_primary_token) {
+          if(body.legacy_primary_token!=='PRIVATE_AGENT_SECRET' ||
+             body.source_token_id || !legacyPrimaryValid)
+            return {ok:false,status:409,async json(){return {detail:'Legacy primary credential changed'}}};
+        }
+        return {ok:true,status:200,async json(){return {
+          agent_id:id,transfer_id:transfer,token_id:transfer,
+          token:'FRESH_DEST_TOKEN_FOR_'+id,chat_url:body.new_chat_url,status:'prepared',
+        }}};
+      }
+      if(url.endsWith('/commit') && options.method==='POST'){
+        if(failTransferCommit)
+          return {ok:false,status:409,async json(){return {detail:'Source binding changed during transfer'}}};
+        if(commitDuringAbort) {
+          delayedCommit=true;
+          return {ok:false,status:503,async json(){return {detail:'Commit response delayed'}}};
+        }
+        const prepared=events.findLast(e=>e.url?.endsWith('/chat-transfers') &&
+          e.method==='POST');
+        committedTransfer={
+          agent_id:id,token_id:transfer,
+          chat_url:JSON.parse(prepared.body).new_chat_url,status:'committed',
+        };
+        if(JSON.parse(prepared.body).legacy_primary_token)
+          legacyPrimaryValid=false;
+        if(ambiguousTransferCommit)
+          return {ok:false,status:503,async json(){return {detail:'Response lost after commit'}}};
+        return {ok:true,status:200,async json(){return committedTransfer}};
+      }
+      if(options.method==='DELETE'){
+        if(foreignLeaseAfterAbort){
+          foreignLease=foreignLeaseAfterAbort;
+          foreignLeaseAfterAbort=null;
+          return {ok:true,status:200,async json(){return {aborted:false}}};
+        }
+        if(foreignLease)
+          return {ok:true,status:200,async json(){return {aborted:false}}};
+        if(delayedCommit && commitDuringAbort){
+          const prepared=events.findLast(e=>e.url?.endsWith('/chat-transfers') &&
+            e.method==='POST');
+          committedTransfer={
+            agent_id:id,token_id:transfer,
+            chat_url:JSON.parse(prepared.body).new_chat_url,status:'committed',
+          };
+          delayedCommit=false;
+          if(abortRecheckUnavailable) bindingLookupDown=true;
+          return {ok:true,status:200,async json(){return {aborted:false}}};
+        }
+        return {ok:true,status:200,async json(){return {aborted:true}}};
+      }
+    }
+    if(url.endsWith('/api/v1/admin/agents')) {
+      if(registryFails) return {ok:false,status:503,async json(){return {detail:'Unavailable'}}};
+      if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
+        return {ok:false,status:403,async json(){return {detail:'Invalid admin token'}}};
+      const records=Object.values(data.agentsByChat)
+        .filter(a=>a?.agentId && a.server!=='https://elsewhere.example' &&
+               (remoteAgentIds===null || remoteAgentIds.includes(a.agentId)));
+      return {ok:true,status:200,async json(){return {items:[
+        ...records.map(a=>({agent_id:a.agentId,name:a.name,kind:'chatgpt',
+          role:a.role||'',purpose:a.purpose||'',description:a.description||'',teams:[]})),
+        ...remoteProfiles,
+      ]}}};
+    }
+    if(url.includes('/chat-credentials')) {
+      const id=url.split('/agents/')[1].split('/chat-credentials')[0];
+      if(options.method==='POST') {
+        const agent=remoteProfiles.find(a=>a.agent_id===id);
+        if(!agent) return {ok:false,status:404,async json(){return {detail:'Unknown agent_id'}}};
+        if(agent.kind!=='chatgpt') return {ok:false,status:400,async json(){return {detail:'Only ChatGPT agents can be bound'}}};
+        if(remoteBindConflict && !JSON.parse(options.body).replace_existing)
+          return {ok:false,status:409,async json(){return {detail:'Agent or chat already has an active binding'}}};
+        return {ok:true,status:200,async json(){return {
+          agent_id:id,token_id:'credential-'+id,token:'CHAT_BIND_TOKEN_FOR_'+id,
+          agent,
+        }}};
+      }
+      if(options.method==='DELETE') return {ok:true,status:200,async json(){return {revoked:true}}};
+    }
     if(url.endsWith('/api/v1/admin/agent-ids')) {
       if(registryFails) return {ok:false,status:503,async json(){return {detail:'Unavailable'}}};
       if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
@@ -140,18 +275,29 @@ function networkHarness({
                 teams:adminTeamMembership.get(agentId)||[{team_id:'default',name:'default'}]};
       }};
     }
-    if(url.endsWith('/api/v1/agents/register')){
+    if(url.endsWith('/api/v1/admin/chatgpt-agents')){
       if(options.headers['X-Agent-Network-Admin-Token']!==ADMIN_TEST_TOKEN)
         return {ok:false,status:403,async json(){return {detail:'Invalid admin token'}}};
       if(registrationDelay) await new Promise(resolve=>setTimeout(resolve,registrationDelay));
       created++;
       const id='uuid-identity-'+created;
       return {ok:true,status:200,async json(){return {
-        agent:{agent_id:id},token:'PRIVATE_AGENT_SECRET'
+        agent:{agent_id:id,name:JSON.parse(options.body).name,role:JSON.parse(options.body).role,
+          kind:'chatgpt',purpose:JSON.parse(options.body).purpose,description:JSON.parse(options.body).description,teams:[]},
+        token:'PRIVATE_AGENT_SECRET',token_id:'chat-token-'+id
       }}};
     }
     if(url.endsWith('/api/v1/agents/hud')){
-      if(verifyFails) return {ok:false,status:403,async json(){return {detail:'Invalid token'}}};
+      hudRequests++;
+      if(bindForeignDuringLegacyHud && hudRequests>=2)
+        foreignLease={agent_id:'uuid-identity-1',
+          token_id:'new-external-token-C',
+          chat_url:'https://chatgpt.com/c/33333333-3333-3333-3333-333333333333'};
+      if(legacyStatusUnavailable)
+        return {ok:false,status:503,async json(){return {detail:'Service unavailable'}}};
+      if(verifyFails || (!legacyPrimaryValid &&
+                         options.headers['X-Agent-Token']==='PRIVATE_AGENT_SECRET'))
+        return {ok:false,status:403,async json(){return {detail:'Invalid token'}}};
       const agent=Object.values(data.agentsByChat)
         .find(a=>a?.agentId===options.headers['X-Agent-Id'] &&
                  (remoteAgentIds===null || remoteAgentIds.includes(a.agentId)) &&
@@ -182,7 +328,7 @@ function networkHarness({
       {tab:tabs.get(tabId),frameId:0},resolve));
   const popupRequest=(tabId,type,extra={})=>
     new Promise(resolve=>listeners.message({type,tabId,...extra},{},resolve));
-  const start=tabId=>request(tabId,'network:start',{profile:{
+  const start=tabId=>popupRequest(tabId,'network:start',{profile:{
     name:'Same-Agent',role:'Developer',purpose:'Testing',description:'',
   }});
   const tick=async()=>{
@@ -200,6 +346,24 @@ function networkHarness({
     alarm:async()=>{listeners.alarm({name:'agent-network-resume'});await tick();},
     ping:async()=>{for(const fn of intervals.values())fn();await tick();},
     open:(tabId,url)=>{tabs.set(tabId,{id:tabId,url});},
+    allowBindingLookups:()=>{bindingLookupDown=false;},
+    rotateLegacyPrimary:()=>{legacyPrimaryValid=false;remoteLeaseCleared=true;},
+    pauseLegacyAuth:()=>{legacyStatusUnavailable=true;},
+    resumeLegacyAuth:()=>{legacyStatusUnavailable=false;},
+    get legacyPrimaryValid(){return legacyPrimaryValid;},
+    clearRemoteLease:()=>{remoteLeaseCleared=true;committedTransfer=null;},
+    assignForeignLease:chatUrl=>{
+      foreignLease={agent_id:'uuid-identity-1',
+        token_id:'external-chat-token-C',chat_url:chatUrl};
+      committedTransfer=null;
+    },
+    assignForeignLeaseOnAbort:chatUrl=>{
+      foreignLeaseAfterAbort={agent_id:'uuid-identity-1',
+        token_id:'external-chat-token-C',chat_url:chatUrl};
+      committedTransfer=null;
+    },
+    deleteRemoteAgent:()=>{remoteAgentDeleted=true;committedTransfer=null;},
+    get committedTransfer(){return committedTransfer;},
     get registrations(){return created;}
   };
 }
@@ -350,14 +514,14 @@ test('migration preview lists only locally owned identities and preserves their 
   assert.equal(agent.purpose,'Testing');
   assert.equal(agent.chatUrl,PLAIN);
   assert.equal(JSON.stringify(options).includes('PRIVATE_AGENT_SECRET'),false);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(preview.ok,true);
   assert.equal(preview.migrate,true);
   assert.equal(preview.fromChatUrl,PLAIN);
   assert.equal(preview.toChatUrl,OTHER);
   assert.equal(preview.agentId,'uuid-identity-1');
   assert.equal(JSON.stringify(preview).includes('PRIVATE_AGENT_SECRET'),false);
-  assert.equal((await h.request(11,'network:migration-preview',{name:'Somebody-Else'})).ok,false);
+  assert.equal((await h.popupRequest(11,'network:migration-preview',{name:'Somebody-Else'})).ok,false);
 });
 
 test('authoritative admin snapshot removes deleted agents from local Chrome storage',async()=>{
@@ -444,8 +608,8 @@ test('confirmed migration moves the SAME agent to a different existing conversat
   const h=networkHarness({urls:[PROJECT,OTHER]});
   await h.start(10);
   const oldId=h.data.agentsByChat[PLAIN].agentId;
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
-  const migrated=await h.request(11,'network:migrate',{
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const migrated=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
@@ -468,18 +632,184 @@ test('confirmed migration moves the SAME agent to a different existing conversat
   assert.match(newPrompt.text,/read_instructions\(agent_id, token\)/);
   assert.match(newPrompt.text,/Use save_context only when the user explicitly asks/);
   assert.match(newPrompt.text,/agent_id: uuid-identity-1/);
-  assert.match(newPrompt.text,/token: PRIVATE_AGENT_SECRET/);
+  assert.match(newPrompt.text,/token: FRESH_DEST_TOKEN_FOR_uuid-identity-1/);
+  assert.equal(newPrompt.text.includes('token: PRIVATE_AGENT_SECRET'),false);
+  assert.notEqual(h.data.agentsByChat[OTHER].token,'PRIVATE_AGENT_SECRET');
+  assert.equal(h.data.agentsByChat[OTHER].chatCredentialId,'transfer-uuid-identity-1');
   assert.equal(newPrompt.allowNewChat,false);
   assert.equal((await h.request(10,'network:status')).entry,null);
   assert.equal((await h.request(11,'network:status')).entry.agentId,oldId);
 });
 
+test('legacy primary-only agent migrates with automatic primary rotation',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER]});
+  await h.start(10);
+  const agent=h.data.agentsByChat[PLAIN];
+  delete agent.chatCredentialId; // v0.7 stored a permanent primary bearer.
+  const oldId=agent.agentId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  assert.equal(preview.ok,true,preview.error);
+  assert.equal(preview.rotatesPrimary,true);
+  const migrated=await h.popupRequest(11,'network:migrate',{
+    agentId:oldId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(migrated.ok,true,migrated.error);
+  assert.equal(h.legacyPrimaryValid,false);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,oldId);
+  assert.equal(h.data.agentsByChat[OTHER].chatCredentialId,'transfer-'+oldId);
+  assert.equal(h.registrations,1);
+  const prepared=h.events.find(e=>e.url?.endsWith('/chat-transfers') &&
+                                   e.method==='POST');
+  assert.equal(JSON.parse(prepared.body).source_token_id,'');
+  assert.equal(JSON.parse(prepared.body).legacy_primary_token,'PRIVATE_AGENT_SECRET');
+  const destination=h.events.filter(e=>e.type==='agent:send' && e.tabId===11);
+  assert.equal(destination.length,1);
+  assert.equal(destination[0].body.text.includes('token: PRIVATE_AGENT_SECRET'),false);
+  assert.match(destination[0].body.text,/token: FRESH_DEST_TOKEN_FOR_uuid-identity-1/);
+});
+
+test('legacy transfer failing bootstrap never rotates primary and restores source',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],failTransferBootstrap:true});
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/Destination composer rejected bootstrap/);
+  assert.equal(h.legacyPrimaryValid,true);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+  assert.equal(h.data.agentsByChat[PLAIN].token,'PRIVATE_AGENT_SECRET');
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.events.filter(e=>e.method==='POST' &&
+    e.url?.endsWith('/commit')).length,0);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,1);
+});
+
+test('legacy commit failure with lost GET restores original valid primary after reconnect',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],failTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[PLAIN].token,'PRIVATE_AGENT_SECRET');
+  assert.equal(h.legacyPrimaryValid,true);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+});
+
+test('legacy ambiguous commit is recovered as a rotated source with valid B lease',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  assert.equal(h.legacyPrimaryValid,false);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].active,true);
+  assert.notEqual(h.data.agentsByChat[OTHER].token,'PRIVATE_AGENT_SECRET');
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+});
+
+test('foreign C binding between legacy null GET and primary HUD cannot revive A PUSH',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],failTransferCommit:true,
+    reconcileUnavailable:true,bindForeignDuringLegacyHud:true});
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const failed=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(failed.ok,false);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].token,'PRIVATE_AGENT_SECRET');
+  assert.equal(h.data.agentsByChat[PLAIN].active,false,
+    'legacy source is paused even if primary remains valid');
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.length,1,'foreign C does not re-enable old A PUSH');
+  assert.equal(h.sockets[0].closed,true);
+});
+
+test('legacy recovery keeps pending when primary status cannot be confirmed',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],failTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  h.allowBindingLookups();
+  h.pauseLegacyAuth();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  h.resumeLegacyAuth();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+});
+
+test('admin rotation during legacy pending revokes A without reviving source',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],failTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  h.rotateLegacyPrimary();
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.legacyPrimaryValid,false);
+});
+
 test('migration into a brand-new blank ChatGPT tab waits for first conversation ID',async()=>{
   const h=networkHarness({urls:[PROJECT,'https://chatgpt.com/']});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(preview.needsNewChat,true);
-  const migrated=await h.request(11,'network:migrate',{
+  const migrated=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
@@ -489,7 +819,11 @@ test('migration into a brand-new blank ChatGPT tab waits for first conversation 
   assert.equal(h.data.agentsByChat[PLAIN],undefined);
   assert.equal(h.data.agentsByChat[migrated.toChatUrl].agentId,preview.agentId);
   assert.equal(h.registrations,1);
-  assert.equal(h.events.filter(e=>e.type==='agent:send').at(-1).body.allowNewChat,true);
+  assert.equal(h.events.filter(e=>e.type==='agent:send').at(-1).body.allowNewChat,false);
+  const sends=h.events.filter(e=>e.type==='agent:send').map(e=>e.body);
+  assert.equal(sends.length,3); // initial registration, secret-free primer, new bootstrap
+  assert.equal(sends[1].allowNewChat,true);
+  assert.equal(sends[1].text.includes('token:'),false);
   assert.equal(h.sockets.length,2);
 });
 
@@ -497,9 +831,9 @@ test('migration can bootstrap into a project new-chat URL without a conversation
   const projectRoot='https://chatgpt.com/g/g-p-6af61be7a30c8191a28628b8c44f715b-blender-edu';
   const h=networkHarness({urls:[PLAIN,projectRoot]});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(preview.ok,true,preview.error);
-  const outcome=await h.request(11,'network:migrate',{
+  const outcome=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
@@ -507,28 +841,87 @@ test('migration can bootstrap into a project new-chat URL without a conversation
   assert.equal(h.registrations,1);
 });
 
-test('failed token validation leaves old binding and PUSH untouched',async()=>{
+test('revoked old token is recovered through admin without manual changes',async()=>{
   const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
-  const result=await h.request(11,'network:migrate',{
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
-  assert.equal(result.ok,false);
-  assert.match(result.error,/подтвердить доступ/);
-  assert.equal(h.sockets[0].closed,false);
-  assert.equal(h.data.agentsByChat[PLAIN].active,true);
-  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(result.ok,true,result.error);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,preview.agentId);
+  const request=h.events.find(e=>e.method==='POST' && e.url?.endsWith('/chat-transfers'));
+  assert.equal(JSON.parse(request.body).admin_recovery,true);
+  assert.equal(JSON.parse(request.body).source_token_id,'');
+  assert.equal(JSON.parse(request.body).legacy_primary_token,undefined);
   assert.equal(h.registrations,1);
-  assert.equal(h.events.filter(e=>e.type==='agent:send').length,1);
+});
+
+test('legacy primary 403 also migrates via admin without sending stale secret',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true});
+  await h.start(10);
+  delete h.data.agentsByChat[PLAIN].chatCredentialId;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(outcome.ok,true,outcome.error);
+  const staged=h.events.find(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers'));
+  const request=JSON.parse(staged.body);
+  assert.equal(request.admin_recovery,true);
+  assert.equal(request.legacy_primary_token,undefined);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,preview.agentId);
+  const sent=h.events.filter(e=>e.type==='agent:send' && e.tabId===11).at(-1).body.text;
+  assert.equal(sent.includes('token: PRIVATE_AGENT_SECRET'),false);
+});
+
+test('stale token with server rejection aborts safely without reviving PUSH',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],verifyFails:true,
+    failTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.length,1);
+});
+
+test('revoked local bearer cannot impersonate an agent missing from admin catalog',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true,remoteAgentIds:[]});
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(outcome.ok,false);
+  assert.match(outcome.error,/больше не найден/);
+  assert.equal(h.events.filter(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers')).length,0);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
 });
 
 test('failed new chat composer preserves original identity and reconnects PUSH',async()=>{
   const h=networkHarness({urls:[PROJECT,'https://chatgpt.com/'],failMigrationSend:true});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
-  const result=await h.request(11,'network:migrate',{
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
@@ -537,26 +930,26 @@ test('failed new chat composer preserves original identity and reconnects PUSH',
   assert.equal(h.data.agentsByChat[PLAIN].agentId,preview.agentId);
   assert.equal(h.data.agentsByChat[PLAIN].active,true);
   assert.equal(h.data.agentsByChat[OTHER],undefined);
-  assert.equal(h.sockets[0].closed,true);
-  assert.equal(h.sockets.length,2,'old PUSH owner is reconnected');
+  assert.equal(h.sockets[0].closed,false);
+  assert.equal(h.sockets.length,1,'old PUSH owner was never disconnected');
   assert.equal(h.registrations,1);
 });
 
 test('cannot migrate over an already registered chat or with wrong expected source ID',async()=>{
   const h=networkHarness({urls:[PROJECT,OTHER]});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
-  const forged=await h.request(11,'network:migrate',{
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const forged=await h.popupRequest(11,'network:migrate',{
     agentId:'wrong-id',fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl
   });
   assert.equal(forged.ok,false);
   assert.equal(h.data.agentsByChat[PLAIN].active,true);
   assert.equal(h.sockets.length,1);
-  await h.request(11,'network:start',{profile:{
+  await h.popupRequest(11,'network:start',{profile:{
     name:'Another-Agent',role:'Reviewer',purpose:'Other',description:''
   }});
-  const occupied=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const occupied=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(occupied.ok,false);
   assert.match(occupied.error,/уже есть агент/);
 });
@@ -565,8 +958,8 @@ test('concurrent Start for different chats preserves both with clone-on-read Chr
   const h=networkHarness({urls:[PROJECT,OTHER],registrationDelay:30});
   const profile=name=>({name,role:'Developer',purpose:'',description:''});
   const [a,b]=await Promise.all([
-    h.request(10,'network:start',{profile:profile('Agent-A')}),
-    h.request(11,'network:start',{profile:profile('Agent-B')}),
+    h.popupRequest(10,'network:start',{profile:profile('Agent-A')}),
+    h.popupRequest(11,'network:start',{profile:profile('Agent-B')}),
   ]);
   assert.equal(a.ok,true,a.error);
   assert.equal(b.ok,true,b.error);
@@ -593,16 +986,16 @@ test('concurrent confirmations of the same source cannot duplicate an agent',asy
   const h=networkHarness({urls:[PROJECT,OTHER,third]});
   await h.start(10);
   const [a,b]=await Promise.all([
-    h.request(11,'network:migration-preview',{name:'Same-Agent'}),
-    h.request(12,'network:migration-preview',{name:'Same-Agent'}),
+    h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'}),
+    h.popupRequest(12,'network:migration-preview',{name:'Same-Agent'}),
   ]);
   assert.equal(a.ok,true);
   assert.equal(b.ok,true);
   const [first,second]=await Promise.all([
-    h.request(11,'network:migrate',{
+    h.popupRequest(11,'network:migrate',{
       agentId:a.agentId,fromChatUrl:a.fromChatUrl,expectedDestination:a.toChatUrl,
     }),
-    h.request(12,'network:migrate',{
+    h.popupRequest(12,'network:migrate',{
       agentId:b.agentId,fromChatUrl:b.fromChatUrl,expectedDestination:b.toChatUrl,
     }),
   ]);
@@ -624,7 +1017,7 @@ test('a name without a locally owned token never becomes a migration candidate',
   });
   const available=await h.request(11,'network:available-agents');
   assert.equal(available.items.length,0);
-  const preview=await h.request(11,'network:migration-preview',{name:'No-Secret'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'No-Secret'});
   assert.equal(preview.ok,false);
   assert.match(preview.error,/не найден/);
 });
@@ -633,10 +1026,10 @@ test('migration from ChatGPT project landing /project URL succeeds without anoth
   const destination='https://chatgpt.com/g/g-p-6af61be7a30c8191a28628b8c44f715b-blender-edu/project';
   const h=networkHarness({urls:[PLAIN,destination]});
   await h.start(10);
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(preview.ok,true,preview.error);
   assert.equal(preview.needsNewChat,true);
-  const result=await h.request(11,'network:migrate',{
+  const result=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl,
   });
@@ -644,9 +1037,483 @@ test('migration from ChatGPT project landing /project URL succeeds without anoth
   assert.equal(h.registrations,1);
   assert.equal(h.data.agentsByChat[PLAIN],undefined);
   assert.equal(h.data.agentsByChat[result.toChatUrl].agentId,preview.agentId);
-  assert.equal(h.events.filter(e=>e.type==='agent:send').at(-1).body.allowNewChat,true);
+  assert.equal(h.events.filter(e=>e.type==='agent:send').at(-1).body.allowNewChat,false);
+  const sends=h.events.filter(e=>e.type==='agent:send').map(e=>e.body);
+  assert.equal(sends.length,3); // initial registration, secret-free primer, new bootstrap
+  assert.equal(sends[1].allowNewChat,true);
+  assert.equal(sends[1].text.includes('token:'),false);
 });
 
+
+test('a content script cannot invoke privileged identity migration',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER]});
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const forbidden=await h.request(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(forbidden.ok,false);
+  assert.match(forbidden.error,/только из popup/);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.events.filter(e=>e.type==='agent:send' && e.tabId===11).length,0);
+});
+
+test('blank chat waits until primer reply finishes before sending staged-token bootstrap',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,'https://chatgpt.com/'],primerBusyProbes:3,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const moved=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(moved.ok,true,moved.error);
+  assert.equal(h.events.filter(e=>e.type==='agent:probe' && e.tabId===11).length>=4,true);
+  const sends=h.events.filter(e=>e.type==='agent:send' && e.tabId===11);
+  assert.equal(sends.length,2);
+  assert.equal(sends[0].body.text.includes('token:'),false);
+  assert.match(sends[1].body.text,/FRESH_DEST_TOKEN_FOR_uuid-identity-1/);
+});
+
+test('primer draft is never overwritten and source chat stays bound',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,'https://chatgpt.com/'],probeDraftAfterPrimer:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/черновик/);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+  assert.equal(h.events.filter(e=>e.url?.endsWith('/chat-transfers')).length,0);
+  assert.equal(h.events.filter(e=>e.type==='agent:send' && e.tabId===11).length,1);
+});
+
+test('idle wait aborts after timeout if ChatGPT never finishes generating',async()=>{
+  const h=networkHarness({
+    urls:[OTHER],initialBusyProbes:Infinity,
+  });
+  await assert.rejects(
+    vm.runInContext('waitForChatIdle(10,'+JSON.stringify(OTHER)+',30)',h.context),
+    /генерирует ответ/
+  );
+  assert.equal(h.events.filter(e=>e.type==='agent:send').length,0);
+});
+
+test('ambiguous commit and offline reconciliation persist pending state until recovery',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const source=h.data.agentsByChat[PLAIN];
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  assert.match(uncertain.error,/Результат переноса неизвестен/);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.sockets.length,1);
+  assert.equal(h.sockets[0].closed,true);
+  const waiting=Object.values(h.data.pendingChatTransfers);
+  assert.equal(waiting.length,1);
+  assert.equal(waiting[0].sourceTokenId,source.chatCredentialId);
+  assert.notEqual(waiting[0].next.token,source.token);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,0);
+
+  await h.alarm();
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  assert.equal(h.sockets.length,1);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].active,true);
+  assert.equal(h.data.agentsByChat[OTHER].chatCredentialId,
+               h.committedTransfer.token_id);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('confirmed uncommitted transfer rolls back after outage and restores source',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],failTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const source=h.data.agentsByChat[PLAIN];
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  assert.match(uncertain.error,/Результат переноса неизвестен/);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  assert.equal(h.sockets.length,1);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+  assert.equal(h.data.agentsByChat[PLAIN].token,source.token);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,1);
+  assert.equal(h.sockets.length,2);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('abort:false after concurrent commit finalizes B instead of resurrecting A',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],commitDuringAbort:true});
+  await h.start(10);
+  const oldToken=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const moved=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(moved.ok,true,moved.error);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].active,true);
+  assert.notEqual(h.data.agentsByChat[OTHER].token,oldToken);
+  assert.equal(h.data.agentsByChat[OTHER].chatCredentialId,h.committedTransfer.token_id);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,1);
+  assert.equal(h.sockets.length,2);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('abort:false plus failed post-abort GET keeps pending until later reconciliation',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],commitDuringAbort:true,abortRecheckUnavailable:true,
+  });
+  await h.start(10);
+  const oldToken=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  assert.match(uncertain.error,/Результат переноса неизвестен/);
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  assert.equal(h.sockets.length,1);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].active,true);
+  assert.notEqual(h.data.agentsByChat[OTHER].token,oldToken);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('pending migration blocks mutation and exposes status only to trusted popup',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  const untrusted=await h.request(10,'network:status');
+  const trusted=await h.popupRequest(10,'network:status');
+  assert.equal(untrusted.pendingTransfer,null);
+  assert.equal(trusted.pendingTransfer.toChatUrl,OTHER);
+  for(const [type,payload] of [
+    ['network:stop',{}],
+    ['network:unlink',{}],
+    ['network:set-server',{server:'http://127.0.0.1:8999'}],
+    ['network:repeat-bootstrap',{}],
+    ['network:start',{profile:{
+      name:'Same-Agent',role:'Developer',purpose:'Testing',description:'',
+    }}],
+    ['network:update-token',{token:'PRIVATE_AGENT_SECRET'}],
+    ['network:schedule-set',{schedule:{
+      enabled:true,intervalMinutes:5,text:'hello',
+    }}],
+  ]){
+    const result=await h.popupRequest(10,type,payload);
+    assert.equal(result.ok,false,type+' unexpectedly succeeded');
+    assert.match(result.error,/незавершённый перенос/,type);
+  }
+  assert.equal(h.data.agentsByChat[PLAIN].active,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+});
+
+test('admin token rotation while pending clears stale binding and allows new scoped rebind',async()=>{
+  const profile={agent_id:'uuid-identity-1',name:'Same-Agent',kind:'chatgpt',
+    role:'Developer',purpose:'Testing',description:'',teams:[]};
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,
+    reconcileUnavailable:true,remoteProfiles:[profile],
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(outcome.ok,false);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,1);
+  h.clearRemoteLease(); // Dashboard rotated primary credential and cleared lease.
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.sockets.length,1);
+  assert.equal(h.sockets[0].closed,true);
+  const rebound=await h.popupRequest(10,'network:start',{profile:{
+    agentId:profile.agent_id,name:profile.name,role:profile.role,
+    purpose:profile.purpose,description:profile.description,
+  }});
+  assert.equal(rebound.ok,true,rebound.error);
+  assert.equal(h.data.agentsByChat[PLAIN].agentId,profile.agent_id);
+  assert.equal(h.registrations,1,'rebind must not create another server agent');
+});
+
+test('agent deletion while pending removes stale local identity without reconnecting',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  h.deleteRemoteAgent();
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.sockets.length,1);
+});
+
+test('rotation then remote browser rebind C clears old pending without touching C',async()=>{
+  const c='https://chatgpt.com/c/33333333-3333-3333-3333-333333333333';
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const scheduled=await h.popupRequest(10,'network:schedule-set',{schedule:{
+    enabled:true,intervalMinutes:5,text:'Old agent schedule',
+  }});
+  assert.equal(scheduled.ok,true,scheduled.error);
+  const scoped='http://127.0.0.1:8787|uuid-identity-1';
+  assert.equal(h.data.agentSchedulesById[scoped].enabled,true);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const failed=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(failed.ok,false);
+  h.clearRemoteLease();
+  h.assignForeignLease(c);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.data.agentsByChat[c],undefined,'must not claim remote C lease');
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.length,1,'old PUSH stays disconnected');
+  assert.ok(h.events.some(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')));
+  assert.equal(h.data.agentSchedulesById[scoped].enabled,false);
+});
+
+test('external rebind between GET(null) and abort GET(C) clears stale pending',async()=>{
+  const c='https://chatgpt.com/c/33333333-3333-3333-3333-333333333333';
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  h.clearRemoteLease();
+  h.assignForeignLeaseOnAbort(c);
+  h.allowBindingLookups();
+  await h.alarm();
+  await h.tick();
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(Object.keys(h.data.pendingChatTransfers).length,0);
+  assert.equal(h.sockets.length,1);
+  assert.equal(h.events.filter(e=>e.method==='GET' &&
+    e.url?.endsWith('/chat-binding')).length>=3,true);
+});
+
+test('service worker restart discards old pending when remote lease belongs to C',async()=>{
+  const c='https://chatgpt.com/c/33333333-3333-3333-3333-333333333333';
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  const restarted=networkHarness({
+    urls:[PROJECT,OTHER],
+    initial:structuredClone(h.data.agentsByChat),
+    initialPending:structuredClone(h.data.pendingChatTransfers),
+    remoteForeignLease:{agent_id:'uuid-identity-1',
+      token_id:'external-chat-token-C',chat_url:c},
+  });
+  await restarted.tick();
+  assert.equal(restarted.data.agentsByChat[PLAIN],undefined);
+  assert.equal(Object.keys(restarted.data.pendingChatTransfers).length,0);
+  assert.equal(restarted.sockets.length,0);
+});
+
+test('service worker restart recovers a previously committed remote transfer',async()=>{
+  const h=networkHarness({
+    urls:[PROJECT,OTHER],ambiguousTransferCommit:true,reconcileUnavailable:true,
+  });
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const uncertain=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(uncertain.ok,false);
+  const restarted=networkHarness({
+    urls:[PROJECT,OTHER],initial:structuredClone(h.data.agentsByChat),
+    initialPending:structuredClone(h.data.pendingChatTransfers),
+    remoteCommittedTransfer:structuredClone(h.committedTransfer),
+  });
+  await restarted.tick();
+  assert.equal(restarted.data.agentsByChat[PLAIN],undefined);
+  assert.equal(restarted.data.agentsByChat[OTHER].active,true);
+  assert.equal(Object.keys(restarted.data.pendingChatTransfers).length,0);
+  assert.equal(restarted.sockets.length,1);
+  assert.equal(restarted.sockets[0].closed,false);
+});
+
+test('remote destination conflict never discloses A bearer or even a pending B bearer',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],transferConflict:true});
+  await h.start(10);
+  const old=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/Destination chat already bound/);
+  assert.equal(h.data.agentsByChat[PLAIN].token,old);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.events.filter(e=>e.type==='agent:send' && e.tabId===11).length,0);
+  assert.equal(h.events.some(e=>e.url?.includes('/chat-transfers/') &&
+                            e.url.endsWith('/commit')),false);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('failed destination bootstrap aborts inactive token and restores old PUSH',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],failTransferBootstrap:true});
+  await h.start(10);
+  const old=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/Destination composer rejected bootstrap/);
+  assert.equal(h.data.agentsByChat[PLAIN].token,old);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  const dest=h.events.filter(e=>e.type==='agent:send' && e.tabId===11);
+  assert.equal(dest.length,1);
+  assert.match(dest[0].body.text,/FRESH_DEST_TOKEN_FOR_uuid-identity-1/);
+  assert.equal(dest[0].body.text.includes('PRIVATE_AGENT_SECRET'),false);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,1);
+  assert.equal(h.events.filter(e=>e.method==='POST' &&
+    e.url?.endsWith('/commit')).length,0);
+  assert.equal(h.sockets.length,2);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('lost commit response reconciles server-owned B lease without reviving A',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],ambiguousTransferCommit:true});
+  await h.start(10);
+  const oldToken=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const moved=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(moved.ok,true,moved.error);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.notEqual(h.data.agentsByChat[OTHER].token,oldToken);
+  assert.ok(h.events.some(e=>e.url?.endsWith('/chat-binding') && e.method==='GET'));
+  assert.equal(h.events.some(e=>e.url?.includes('/chat-transfers/') &&
+                            e.method==='DELETE'),false);
+  assert.equal(h.sockets.length,2);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('failed server commit aborts pending bearer and keeps A identity intact',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],failTransferCommit:true});
+  await h.start(10);
+  const original=h.data.agentsByChat[PLAIN].token;
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const result=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(result.ok,false);
+  assert.match(result.error,/Source binding changed during transfer/);
+  assert.equal(h.data.agentsByChat[PLAIN].token,original);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  const payload=h.events.filter(e=>e.type==='agent:send' && e.tabId===11).at(-1);
+  assert.ok(payload);
+  assert.equal(payload.body.text.includes('token: '+original),false);
+  assert.equal(h.events.filter(e=>e.method==='DELETE' &&
+    e.url?.includes('/chat-transfers/')).length,1);
+  assert.equal(h.sockets.at(-1).closed,false);
+});
+
+test('new blank destination creates chat with secret-free primer before leasing token',async()=>{
+  const h=networkHarness({urls:[PROJECT,'https://chatgpt.com/'],transferConflict:true});
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(outcome.ok,false);
+  const texts=h.events.filter(e=>e.type==='agent:send' && e.tabId===11);
+  assert.equal(texts.length,1);
+  assert.equal(texts[0].body.allowNewChat,true);
+  assert.equal(texts[0].body.text.includes('token:'),false);
+  assert.equal(h.data.agentsByChat[PLAIN].active,true);
+});
 
 test('storage writes from two independent async paths cannot overwrite each other',async()=>{
   const h=networkHarness({urls:[]});
@@ -907,7 +1774,7 @@ test('new ChatGPT agent requires admin-token; no identity is created otherwise',
   const retry=await h.start(10);
   assert.equal(retry.ok,true,retry.error);
   assert.equal(h.registrations,1);
-  const registration=h.events.find(e=>e.url.endsWith('/api/v1/agents/register'));
+  const registration=h.events.find(e=>e.url.endsWith('/api/v1/admin/chatgpt-agents'));
   assert.ok(registration);
   const bootstrap=h.events.find(e=>e.type==='agent:send').body.text;
   assert.match(bootstrap,/read_instructions\(agent_id, token\)/);
@@ -940,9 +1807,9 @@ test('repeat bootstrap preserves migration-specific read_context instructions',a
   assert.equal(started.ok,true,started.error);
   assert.equal(h.data.agentsByChat[PLAIN].bootstrapMigrated,false);
 
-  const preview=await h.request(11,'network:migration-preview',{name:'Same-Agent'});
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
   assert.equal(preview.ok,true,preview.error);
-  const transferred=await h.request(11,'network:migrate',{
+  const transferred=await h.popupRequest(11,'network:migrate',{
     agentId:preview.agentId,
     fromChatUrl:preview.fromChatUrl,
     expectedDestination:preview.toChatUrl,
@@ -1015,4 +1882,86 @@ test('resending identity is blocked when conversation navigation invalidates bin
   assert.equal(response.ok,false);
   assert.equal(h.events.filter(e=>e.type==='agent:send').length,1,
     'only the original bootstrap may have been sent');
+});
+
+test('dashboard-created ChatGPT agent appears in catalog without a token and gets a token on bind',async()=>{
+  const synced={agent_id:'server-created',name:'Server-ChatGPT',kind:'chatgpt',
+    role:'Developer',purpose:'Existing dashboard identity',description:'No local token',
+    teams:[{team_id:'dev',name:'Dev'}]};
+  const h=networkHarness({urls:[OTHER],remoteProfiles:[synced]});
+  const list=await h.popupRequest(10,'network:available-agents');
+  assert.equal(list.ok,true,list.error);
+  assert.equal(list.items.length,1);
+  assert.equal(list.items[0].agentId,synced.agent_id);
+  assert.equal(list.items[0].chatUrl,null);
+  assert.equal(JSON.stringify(list).includes('CHAT_BIND_TOKEN'),false);
+  const bound=await h.popupRequest(10,'network:start',{profile:{
+    agentId:synced.agent_id,name:synced.name,role:synced.role,
+    purpose:synced.purpose,description:synced.description,
+  }});
+  assert.equal(bound.ok,true,bound.error);
+  assert.equal(bound.linked,true);
+  assert.equal(bound.created,false);
+  assert.equal(h.registrations,0,'bind must not create a second server agent');
+  const stored=h.data.agentsByChat[OTHER];
+  assert.equal(stored.agentId,synced.agent_id);
+  assert.equal(stored.token,'CHAT_BIND_TOKEN_FOR_server-created');
+  assert.equal(stored.chatCredentialId,'credential-server-created');
+  assert.equal(stored.bootstrapDone,true);
+  assert.equal(stored.active,true);
+  assert.equal(h.events.filter(x=>x.type==='agent:send').length,1);
+  assert.ok(h.events.some(x=>x.url.endsWith('/chat-credentials')));
+  assert.equal((await h.popupRequest(10,'network:available-agents')).items.length,0);
+});
+
+test('unlink revokes just the chat credential without deleting server agent',async()=>{
+  const synced={agent_id:'bound-server',name:'Bound-ChatGPT',kind:'chatgpt',
+    role:'Developer',purpose:'',description:'',teams:[]};
+  const h=networkHarness({urls:[OTHER],remoteProfiles:[synced]});
+  const bound=await h.popupRequest(10,'network:start',{profile:{
+    agentId:synced.agent_id,name:synced.name,role:synced.role,
+    purpose:'',description:'',
+  }});
+  assert.equal(bound.ok,true,bound.error);
+  const unlinked=await h.popupRequest(10,'network:unlink');
+  assert.equal(unlinked.ok,true,unlinked.error);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+  assert.equal(h.registrations,0);
+  assert.ok(h.events.some(x=>x.method==='DELETE' && x.url.endsWith(
+    '/chat-credentials/credential-bound-server')));
+  const visible=await h.popupRequest(10,'network:available-agents');
+  assert.equal(visible.items[0].agentId,synced.agent_id,'agent remains on server');
+});
+
+test('non-ChatGPT server agent cannot be bound by the extension',async()=>{
+  const synced={agent_id:'codex-only',name:'Codex-Only',kind:'codex',
+    role:'Developer',purpose:'',description:'',teams:[]};
+  const h=networkHarness({urls:[OTHER],remoteProfiles:[synced]});
+  const options=await h.popupRequest(10,'network:available-agents');
+  assert.equal(options.items[0].kind,'codex');
+  const attempt=await h.popupRequest(10,'network:start',{profile:{
+    agentId:synced.agent_id,name:synced.name,role:synced.role,
+  }});
+  assert.equal(attempt.ok,false);
+  assert.equal(h.data.agentsByChat[OTHER],undefined);
+});
+
+test('explicit server rebind requests fresh lease only after admin confirmation flag',async()=>{
+  const synced={agent_id:'server-locked',name:'Locked-ChatGPT',kind:'chatgpt',
+    role:'Developer',purpose:'',description:'',teams:[]};
+  const h=networkHarness({urls:[OTHER],remoteProfiles:[synced],remoteBindConflict:true});
+  const normal=await h.popupRequest(10,'network:start',{profile:{
+    agentId:synced.agent_id,name:synced.name,role:synced.role,purpose:'',description:'',
+  }});
+  assert.equal(normal.ok,false);
+  assert.match(normal.error,/active binding/);
+  const forced=await h.popupRequest(10,'network:start',{profile:{
+    agentId:synced.agent_id,name:synced.name,role:synced.role,purpose:'',description:'',
+    rebind:true,
+  }});
+  assert.equal(forced.ok,true,forced.error);
+  const requests=h.events.filter(x=>x.url?.endsWith('/chat-credentials') && x.method==='POST');
+  assert.equal(requests.length,2);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,synced.agent_id);
+  assert.equal(h.registrations,0);
 });

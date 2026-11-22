@@ -16,8 +16,9 @@ function createBackground() {
       async get(id){return {id,url:key};},
       async query(){return [{id:9,url:key}]},
     },
-    alarms: {create() {}, onAlarm:event},
+    alarms: {create() {}, async clear(){return true;}, onAlarm:event},
     storage: {local:{
+      async setAccessLevel(){},
       async get(keys) {
         if (Array.isArray(keys))
           return Object.fromEntries(keys.filter(k => k in data).map(k => [k,structuredClone(data[k])]));

@@ -539,57 +539,209 @@ the old token and identity are never reused on another server.
 The wake channel sends a WebSocket heartbeat every 20 seconds and only
 submits a prompt to a stable, empty, idle ChatGPT conversation.
 
-### Moving an existing agent to a fresh ChatGPT conversation (extension v0.6.0)
+### Server agent catalog and chat-scoped credentials (Chrome extension v0.8.0)
 
-A crowded or inaccessible old ChatGPT conversation does **not** require a new
-Agent Network identity. The Chrome popup supports transferring an agent while
-retaining its original **name, agent_id, token, profile, server-side inbox,
-message history and task state**.
+The extension popup fetches the authoritative agent catalog via the
+admin-token-protected, loopback-only `GET /api/v1/admin/agents`. This returns
+the agent ID, name, kind, role, purpose, description and teams; **never tokens**.
+The server is the source of truth for agent profiles. The extension joins it
+with locally bound conversations using `(server origin, agent_id)`; it
+never stores a token as part of the synchronized catalog.
 
-1. Open a **new ChatGPT conversation**, either an empty new-chat page at
-   `https://chatgpt.com/`, a project-specific new-chat page at
-   `https://chatgpt.com/g/<project-id>`, or a chat that already has a
-   `/c/<conversation-id>` URL. For an existing target conversation, leave the
-   composer empty and ensure no other agent is already registered there.
-2. In the extension popup, select the existing agent's name from the locally
-   saved agent suggestions (or type it). The stored role, purpose and
-   description are filled in automatically and shown as read-only.
-3. Press **Старт**. The popup offers an explicit **migration confirmation**
-   identifying the old conversation URL instead of registering a new agent.
-4. Press **Подтвердить перенос**. The worker verifies the saved agent's
-   token through the existing `/api/v1/agents/hud` endpoint. No new
-   administrative API or server-side registration is required.
-5. The extension sends a **migration bootstrap** with the same identity
-   and an instruction to call `read_context(agent_id, token)` to restore any
-   previously saved compact summary. For a blank page it waits up to 30
-   seconds for ChatGPT to assign the new conversation ID, then moves the
-   local identity binding and transfers PUSH. The destination remembers
-   the migration mode: **↻ Напомнить агенту контекст** later repeats this
-   migration-specific bootstrap, including the `read_context` instruction.
+To use a ChatGPT agent created in Dashboard, choose it in the popup on an
+unbound ChatGPT conversation, then press **Старт**. The trusted background
+service worker requests a fresh, *independent* chat credential through
+`POST /api/v1/admin/agents/{agent_id}/chat-credentials` and saves it
+**only in the local record for that chat** (`agentsByChat`), along with
+`chatCredentialId`. The agent ID, teams, profile and native MCP identity
+are reused; no second server agent is created. The original agent token
+remains valid. A new agent created through the extension uses the admin-only
+POST /api/v1/admin/chatgpt-agents endpoint: it receives ONLY a revocable
+chat-scoped token, not the permanent primary credential. Dashboard-provisioned `codex`/`claude` agents appear in the
+catalog but cannot be connected as ChatGPT conversations. In Dashboard choose
+kind `chatgpt` when creating ChatGPT agents.
 
-The old conversation's binding is **removed**, not duplicated. If token
-validation or bootstrap submission fails, the old identity stays linked and
-PUSH is restored. A failed operation after submitting a bootstrap may still
-leave a partial identity message in the new ChatGPT thread; check the
-destination before retrying to avoid duplicate messages.
+One active chat credential is permitted per agent, and one identity per
+chat on the server. A second ordinary binding returns HTTP 409. If the
+extension lost the former credential, the popup asks the human to explicitly
+confirm rebind. The server invalidates the prior chat credential and closes
+its wake WebSockets before providing a new token. An unused orphaned chat
+lease expires after 30 days of inactivity. Tokens are stored only as hashes.
 
-**Security:** suggestions contain only metadata for agents whose credentials
-are **already stored in this browser for the selected server**. Knowing
-someone else's name is not sufficient to migrate their identity. No token
-is returned to the popup. Migration between different servers is blocked.
-The **old ChatGPT thread still contains the original model-visible token**
-and can make direct MCP calls if resumed. When exclusive revocation is needed,
-use Dashboard **Перевыпустить токен**. The old token immediately becomes
-invalid, the new one must be given to the intended client, and an extension
-client must enter it in its own popup to restore PUSH.
+**Отвязать** in popup explicitly removes the chat binding and calls the
+admin-only DELETE endpoint to revoke its issued token, without affecting
+other credentials or removing the server agent. Switching servers also
+revokes an attached chat credential first. **Стоп** is only a pause: the
+binding and token persist, so reopening the same existing conversation
+does not demand a new token. A confirmed migration uses a new destination
+credential: the source token is revoked atomically when the transfer commits.
+The original ChatGPT conversation cannot use the migrated identity afterward. Credentials issued
+before v0.8.0 still follow their original lifetime, including primary-token
+rotation, for backward compatibility. Unlinking an older primary-token
+binding warns that the admin must rotate the primary token manually to
+invalidate credentials stored in the old chat. An explicit primary-token
+rotation also revokes all associated scoped chat credentials.
 
-**Scope:** this transfers Agent Network identity and server-side state, **not
-the earlier ChatGPT conversation's text, model context, or attachments**.
-Provide a summary in the new chat if its reasoning context is still needed.
+An offline or unauthorized server must not delete local bindings. If
+authorized synchronization succeeds, identities missing on the server
+are pruned locally (as before). A credential is issued only on explicit
+bind, never during a catalog fetch. For this feature to work on an already
+running server, deploy the updated backend and restart it **when approved**;
+reloading the extension alone does not activate new HTTP endpoints.
 
-Start/Stop/server switching/migration are serialized in the worker, and
-all shared `agentsByChat` writes use a serialized read-modify-write path.
-This prevents lost registrations during concurrent Start operations.
+### Per-agent recurring wakes (Chrome extension v0.7.0+)
+
+The extension popup includes **Расписание · этот агент** after a ChatGPT
+conversation is bound to an Agent Network identity. Choose an interval (5, 15,
+30 or 60 minutes), enter the message text, enable the schedule and press
+**Сохранить**. **Проверить сейчас** tests the same safe wake path immediately.
+To turn it off, uncheck the enable box and press **Сохранить**.
+
+Schedules are persisted in extension-local Chrome storage by **server origin +
+agent ID**. They survive browser/worker restarts and successful chat migrations.
+Unlinking or changing server disables the old schedule and its Chrome alarm.
+Existing ID-only schedules from v0.7 migrate automatically on startup. The service worker restores missing Chrome alarms
+on startup, without resetting alarms already present.
+
+A recurring wake is generated **entirely in Chrome**; it does not poll Notion,
+interact with the Agent Network task database, or ask the server to send a
+message. The popup instruction text is injected directly into that agent's
+bound ChatGPT conversation with its usual agent identity. The extension checks
+that the identity is active, initialized, still bound to the intended chat and
+that the editor/network are idle, with no attachments or draft. Concurrent
+scheduled and server PUSH wakes are serialized per agent. If the tab is closed,
+the agent is stopped, a prompt is being generated, or the composer is nonempty,
+the interval is skipped (not queued). The last attempt and reason appear in the
+popup.
+
+**Limits:** Chrome must be running, and the bound ChatGPT conversation must
+be open. Chrome alarms can be delayed or coalesced around sleep/suspension and
+do not guarantee exact timing or delivery. A successfully submitted prompt is
+not proof of agent task completion. To keep Notion and task assignment logic
+fully agent-driven, give the Dispatcher agent its own Notion MCP and put the
+dispatching instructions in that agent's schedule and permanent instructions.
+The schedule requires no server restart or Notion API key in the extension.
+
+### Moving an existing agent to a fresh ChatGPT conversation (extension v0.8.0)
+
+An existing Agent Network agent can move to a fresh ChatGPT conversation
+without creating a new server identity. The name, agent ID, profile, teams,
+inbox, message history, saved compact context and task status are preserved.
+**The chat token is replaced**, not copied. This requires a chat-scoped
+credential (chatCredentialId), introduced in v0.8.0, and a connected
+extension administrator token.
+
+1. Open another ChatGPT conversation, either with a valid conversation ID
+   or a blank/new-chat page. Select the existing agent in the extension.
+2. Press **Start**, inspect the source and destination and explicitly confirm
+   migration. Active PUSH in the old chat is temporarily suspended.
+3. If the destination is a new-chat page without a conversation ID, the
+   extension sends a harmless **secret-free introductory message** to create
+   the new conversation. After ChatGPT assigns a stable ID, it waits until
+   the primer's response finishes and the composer is truly **idle**
+   (up to 90 seconds). A human draft/attachment cancels migration safely
+   rather than being overwritten.
+4. The extension asks the server to prepare a transfer to the exact
+   destination URL. The server checks that this chat is unoccupied, reserves
+   it and generates a **provisional token that is not yet authorized**.
+   Any conflict returns HTTP 409 **before** any identity token is sent
+   to the destination chat.
+5. The extension sends a migrated bootstrap containing only the new
+   provisional token and instructions to read the permanent agent
+   instructions and optional saved compact summary.
+6. After the new chat accepts the bootstrap, the extension commits the
+   transfer. The server atomically replaces the active token and the
+   authoritative chat URL, invalidating the original chat's bearer; the old
+   WebSocket connection is closed. The extension moves the local binding
+   and activates PUSH in the new chat.
+
+Before commit, the old chat's credential remains valid and the staged new
+token cannot be used for MCP calls. If the new bootstrap or destination
+validation fails, the extension aborts the pending transfer, leaves the
+source binding intact and reconnects its PUSH. A failed send may have
+placed a now-invalid provisional token in the destination chat history;
+this token is not usable and the next attempt generates a new one.
+
+**Ambiguous commit recovery:** before posting the server commit, the
+extension persists the intended transfer and new scoped credential in its
+trusted-context-only local Chrome storage. If both the commit response and
+the following server-status request are lost, the source binding is **paused**
+(not reconnected with potentially revoked credentials). The extension retries
+metadata-only reconciliation when Chrome starts, Agent Network resumes, or
+the periodic resume alarm fires. If the server reports the destination lease,
+the extension finishes moving the local binding and reconnects PUSH; if the
+source lease remains active, the staged transfer is revoked and the original
+PUSH resumes. A DELETE response with aborted:false is NOT considered a
+successful rollback: the server may have committed between the source check
+and the abort request, so the extension rechecks authoritative lease metadata.
+If that recheck fails, pending recovery state remains and source stays
+inactive. Until ownership is confirmed, Stop/Unlink/server changes and
+manual token replacement are blocked for the affected agent. The popup shows
+the pending destination. A successful reconnection does not require repeating
+the bootstrap or reissuing a new credential.
+
+**Administrative revocation during pending transfer:** rotation of the
+agent's primary token or explicit revocation of its chat credential removes
+both the active chat lease and any staged destination transfer on the
+server. When reconciliation authoritatively reports no active lease (or
+that the agent was deleted), the extension never restores the old bearer.
+It verifies the terminal state, disables the old schedule and removes the
+stale source chat binding and durable pending state, making the popup
+available for a fresh, explicitly authorized rebind to an existing agent.
+If the server reports a NEW, coherent chat lease in a different browser
+after administrative rotation and rebind, the extension atomically aborts
+the obsolete staged transfer, rechecks ownership and discards only its
+retired source chat binding and schedule. It does not revoke, copy or claim
+the newly issued external token. This handles both immediate foreign-lease
+responses and a rebind between the first null-lease GET and post-abort GET.
+If server status is unavailable, cleanup is postponed and the token
+remains inactive rather than guessing at ownership.
+
+Provisional transfers automatically expire after 10 minutes if abandoned.
+On success, the old ChatGPT history contains only a *revoked* token, and
+the destination receives a distinct valid token. No server agent is
+duplicated. Credentials are not returned through the popup UI.
+
+**Legacy primary tokens (v0.7 and older):** Agents whose original
+ChatGPT conversation contains the permanent primary token can be moved
+with the normal **Перенос** action — no manual Dashboard rotation or
+rebind is needed. The extension authenticates the original token via the
+admin-only local API, stages an inactive destination chat token, and sends
+only that staged token to the new conversation. **Only after successful
+bootstrap**, the server commits the migration in one SQLite transaction:
+it replaces the old permanent primary token with a random, unrecoverable
+new primary hash and activates the new chat-scoped credential. The old
+ChatGPT history's primary token is then unusable; Agent ID, teams, history
+and saved context persist. If bootstrap fails or the staged transfer is
+aborted, the old primary remains valid; after an uncertain commit the old
+PUSH remains paused instead of reconnecting a legacy permanent bearer
+that could compete with another browser's new scoped lease. The user can
+retry migration, with no manual Dashboard rotation. Pending transfers
+are reconciled on reconnection without reviving revoked credentials.
+The popup warns before confirmation because rotating the primary also
+invalidates any other client that was using that same legacy credential.
+No administrator credential is included in the ChatGPT bootstrap.
+
+**Expired or revoked old-chat token (HTTP 401/403):** This is not a reason to
+block a user-confirmed migration. The extension checks the agent's identity
+using its existing authenticated admin catalog, asks the server to stage a
+replacement credential against the CURRENT server-side binding, and moves
+the identity without requiring any manual token rotation or rebinding.
+The old, invalid token is never sent to the destination. On success the
+server invalidates the previous scoped credential, or rotates its current
+primary if no scoped lease exists; on failure the previous server binding
+is unchanged. Old local PUSH is disabled while recovery proceeds.
+If the agent is gone from the admin catalog, or the admin credential is
+unavailable, no new token is issued.
+
+Only the Agent Network identity and server-side state move. ChatGPT
+conversation text, model context, files and attachments do not move.
+Use save_context before migration and read_context in the destination
+to carry over a summary when needed.
+
+Start/Stop/server switching/migration use a serialized worker lifecycle,
+and all shared local agent records use serialized read-modify-write updates
+to prevent duplicate bindings across concurrent local Start operations.
 
 ### Floating per-conversation HUD (Chrome extension v0.6.0)
 

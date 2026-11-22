@@ -48,6 +48,7 @@ function createWorker() {
     },
     scripting:{async executeScript(){}},
     storage:{local:{
+      async setAccessLevel(){},
       async get(keys) {
         if(Array.isArray(keys)) return Object.fromEntries(keys.filter(key=>key in data).map(key=>[key,data[key]]));
         return {[keys]:structuredClone(data[keys])};
