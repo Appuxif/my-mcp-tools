@@ -206,7 +206,7 @@ class ExtensionCatalogAndChatTokens(unittest.TestCase):
         """A revoked local primary is no obstacle for a real admin."""
         import hashlib
         old_primary=self.a["token"]
-        self.store.rotate_agent_token(self.aid)  # local Chrome still has old bearer
+        fresh_primary=self.store.rotate_agent_token(self.aid)  # local Chrome still has old bearer
         current_primary=self.store.db.execute(
             "SELECT token_hash FROM agents WHERE agent_id=?", (self.aid,)
         ).fetchone()[0]
@@ -232,9 +232,10 @@ class ExtensionCatalogAndChatTokens(unittest.TestCase):
         self.store.verify(self.aid,staged["token"])
         with self.assertRaises(PermissionError):
             self.store.verify(self.aid,old_primary)
-        self.assertNotEqual(self.store.db.execute(
+        self.assertEqual(self.store.db.execute(
             "SELECT token_hash FROM agents WHERE agent_id=?", (self.aid,)
         ).fetchone()[0],current_primary)
+        self.store.verify(self.aid,fresh_primary["token"])
         self.assertEqual(self.store.chat_binding(self.aid)["chat_url"],target)
         self.assertEqual(sum(a["agent_id"]==self.aid for a in self.store.agents()),1)
 
@@ -245,7 +246,9 @@ class ExtensionCatalogAndChatTokens(unittest.TestCase):
         target="https://chatgpt.com/c/00000000-0000-0000-0000-000000000124"
         path=f"/api/v1/admin/agents/{self.aid}/chat-transfers"
         body={"old_chat_url":self.chat,"new_chat_url":target,
-              "admin_recovery":True}
+              "admin_recovery":True,
+              "expected_source_token_id":source["token_id"],
+              "expected_source_chat_url":stale}
         staged=self.client.post(path,json=body,headers=self.admin)
         self.assertEqual(staged.status_code,200,staged.text)
         dest=staged.json()
@@ -268,7 +271,9 @@ class ExtensionCatalogAndChatTokens(unittest.TestCase):
         target="https://chatgpt.com/c/00000000-0000-0000-0000-000000000124"
         path=f"/api/v1/admin/agents/{self.aid}/chat-transfers"
         body={"old_chat_url":self.chat,"new_chat_url":target,
-              "admin_recovery":True}
+              "admin_recovery":True,
+              "expected_source_token_id":source["token_id"],
+              "expected_source_chat_url":self.chat}
         for invalid in (
             {**body,"source_token_id":source["token_id"]},
             {**body,"legacy_primary_token":self.a["token"]},
@@ -292,6 +297,74 @@ class ExtensionCatalogAndChatTokens(unittest.TestCase):
         self.assertEqual(denied.status_code,409)
         self.store.verify(self.aid,source["token"])
         self.assertNotIn("token",denied.text.lower())
+
+    def test_revoked_scoped_chat_recovery_preserves_unrelated_primary(self):
+        """Scoped A expired, but primary P is used by another MCP client."""
+        scoped=self.client.post(self.url,json={"chat_url":self.chat},
+                                headers=self.admin).json()
+        self.assertTrue(self.store.revoke_chat_token(self.aid,scoped["token_id"]))
+        self.store.verify(self.aid,self.a["token"])
+        path=f"/api/v1/admin/agents/{self.aid}/chat-transfers"
+        target="https://chatgpt.com/c/00000000-0000-0000-0000-000000000124"
+        stage=self.client.post(path,json={
+            "admin_recovery":True,
+            "old_chat_url":self.chat,"new_chat_url":target,
+            "expected_source_token_id":None,
+            "expected_source_chat_url":None,
+        },headers=self.admin)
+        self.assertEqual(stage.status_code,200,stage.text)
+        staged=stage.json()
+        self.assertEqual(self.client.post(
+            f"{path}/{staged['transfer_id']}/commit",headers=self.admin
+        ).status_code,200)
+        self.store.verify(self.aid,self.a["token"])
+        self.store.verify(self.aid,staged["token"])
+        with self.assertRaises(PermissionError):
+            self.store.verify(self.aid,scoped["token"])
+        self.assertEqual(self.store.chat_binding(self.aid)["chat_url"],target)
+
+    def test_recovery_cannot_steal_unconfirmed_foreign_chat(self):
+        """Current chat C cannot be revoked after preview only mentioned A."""
+        scoped=self.client.post(self.url,json={"chat_url":self.chat},
+                                headers=self.admin).json()
+        c="https://chatgpt.com/c/00000000-0000-0000-0000-000000000126"
+        b="https://chatgpt.com/c/00000000-0000-0000-0000-000000000124"
+        current=self.client.post(
+            self.url,json={"chat_url":c,"replace_existing":True},
+            headers=self.admin).json()
+        path=f"/api/v1/admin/agents/{self.aid}/chat-transfers"
+        old_preview=self.client.post(path,json={
+            "admin_recovery":True,"old_chat_url":self.chat,"new_chat_url":b,
+            "expected_source_token_id":scoped["token_id"],
+            "expected_source_chat_url":self.chat,
+        },headers=self.admin)
+        self.assertEqual(old_preview.status_code,409)
+        self.store.verify(self.aid,current["token"])
+        explicit=self.client.post(path,json={
+            "admin_recovery":True,"old_chat_url":self.chat,"new_chat_url":b,
+            "expected_source_token_id":current["token_id"],
+            "expected_source_chat_url":c,
+        },headers=self.admin)
+        self.assertEqual(explicit.status_code,200,explicit.text)
+        staged=explicit.json()
+        self.store.verify(self.aid,current["token"])
+        self.assertEqual(self.client.post(
+            f"{path}/{staged['transfer_id']}/commit",
+            headers=self.admin).status_code,200)
+        with self.assertRaises(PermissionError):
+            self.store.verify(self.aid,current["token"])
+        self.store.verify(self.aid,staged["token"])
+
+    def test_recovery_fails_if_scoped_lease_created_after_empty_preview(self):
+        path=f"/api/v1/admin/agents/{self.aid}/chat-transfers"
+        body={"admin_recovery":True,"old_chat_url":self.chat,
+              "new_chat_url":"https://chatgpt.com/c/00000000-0000-0000-0000-000000000124",
+              "expected_source_token_id":None,"expected_source_chat_url":None}
+        scoped=self.client.post(
+            self.url,json={"chat_url":self.chat},headers=self.admin).json()
+        refused=self.client.post(path,json=body,headers=self.admin)
+        self.assertEqual(refused.status_code,409)
+        self.store.verify(self.aid,scoped["token"])
 
     def test_legacy_primary_migrates_automatically_without_manual_rotation(self):
         """Old ChatGPT's primary token is revoked ONLY upon successful commit."""

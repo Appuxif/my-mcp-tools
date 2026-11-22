@@ -768,11 +768,20 @@ async function migrationPreview(tabId,name,agentId='') {
   if(candidates.length!==1)
     throw Error('Агент не найден среди локально сохранённых регистраций этого сервера.');
   const source=candidates[0];
+  const admin=await adminToken(server);
+  if(!admin) throw Error('Для переноса агента настрой admin-token в расширении.');
+  const binding=await adminRequest(server,admin,
+    '/api/v1/admin/agents/'+encodeURIComponent(source.agentId)+'/chat-binding');
+  if(binding.agent_id!==source.agentId)
+    throw Error('Сервер вернул неправильную привязку агента.');
+  const takeover=!!binding.chat_url && binding.chat_url!==source.chatUrl;
   return {
     migrate:true,agentId:source.agentId,name:source.name,
     fromChatUrl:source.chatUrl,toChatUrl:tab.url,
-    needsNewChat:!target,server,
-    rotatesPrimary:!(entries[source.chatUrl]?.chatCredentialId),
+    serverSourceChatUrl:binding.chat_url,
+    serverSourceTokenId:binding.token_id,
+    takeover,needsNewChat:!target,server,
+    rotatesPrimary:!(entries[source.chatUrl]?.chatCredentialId) && !binding.token_id,
   };
 }
 
@@ -1042,7 +1051,10 @@ async function recoverPendingTransfers() {
   try {await work;}
   finally {if(pendingRecoveryPromise===work) pendingRecoveryPromise=null;}
 }
-async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestination) {
+async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestination,
+                            expectedServerTokenId=undefined,
+                            expectedServerChatUrl=undefined,
+                            allowTakeover=false) {
   const tab=await chrome.tabs.get(Number(tabId));
   if(!tab || tab.url!==expectedDestination)
     throw Error('Адрес новой беседы изменился после подтверждения.');
@@ -1062,10 +1074,27 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
     throw Error('У агента есть незавершённый перенос. Дождись восстановления.');
   const admin=await adminToken(server);
   if(!admin) throw Error('Для переноса агента настрой admin-token в расширении.');
+  const binding=await adminRequest(server,admin,
+    '/api/v1/admin/agents/'+encodeURIComponent(old.agentId)+'/chat-binding');
+  if(binding.agent_id!==old.agentId)
+    throw Error('Сервер вернул неправильную привязку агента.');
+  if(expectedServerTokenId!==undefined &&
+     (expectedServerTokenId!==binding.token_id ||
+      expectedServerChatUrl!==binding.chat_url))
+    throw Error('Привязка агента изменилась после подтверждения. Повтори перенос.');
+  const remoteTakeover=!!binding.chat_url && binding.chat_url!==fromChatUrl;
+  if(remoteTakeover && (!allowTakeover ||
+       expectedServerTokenId!==binding.token_id ||
+       expectedServerChatUrl!==binding.chat_url))
+    throw Error('Агент уже работает в другом чате: '+binding.chat_url+
+      '. Сначала подтверди перенос именно из этого чата.');
   const oldTokenValid=await verifyMigrationAgent(server,old);
+  const useAdminRecovery=!oldTokenValid ||
+    binding.token_id!==(old.chatCredentialId||null) ||
+    (binding.token_id!==null && binding.chat_url!==fromChatUrl);
   let authoritativeAgent=null;
-  if(!oldTokenValid) {
-    // Admin authentication (not the stale agent token) is the permission
+  if(useAdminRecovery) {
+    // Admin authentication (not a stale or misbound agent token) is the permission
     // required to recover an existing agent. Never create another identity.
     const catalogue=await adminRequest(server,admin,'/api/v1/admin/agents');
     authoritativeAgent=catalogue.items?.find(agent=>
@@ -1111,11 +1140,13 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
     // is not occupied. A still owns its old token until commit.
     prepared=await adminRequest(server,admin,
       '/api/v1/admin/agents/'+encodeURIComponent(old.agentId)+'/chat-transfers',
-      'POST',{source_token_id:oldTokenValid?(old.chatCredentialId||''):'',
+      'POST',{source_token_id:useAdminRecovery?'':(old.chatCredentialId||''),
               old_chat_url:fromChatUrl,new_chat_url:targetKey,
-              ...(oldTokenValid && !old.chatCredentialId
+              ...(!useAdminRecovery && !old.chatCredentialId
                 ?{legacy_primary_token:old.token}:{}),
-              admin_recovery:!oldTokenValid});
+              admin_recovery:useAdminRecovery,
+              expected_source_token_id:binding.token_id,
+              expected_source_chat_url:binding.chat_url});
     if(prepared.agent_id!==old.agentId || !prepared.transfer_id ||
        !prepared.token || prepared.token_id!==prepared.transfer_id ||
        prepared.chat_url!==targetKey)
@@ -1147,8 +1178,8 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
     const pending={
       key:pendingTransferKey(old),server,agentId:old.agentId,
       transferId:prepared.transfer_id,sourceTokenId:old.chatCredentialId||null,
-      legacyPrimary:oldTokenValid && !old.chatCredentialId,
-      recoveryStaleSource:!oldTokenValid,
+      legacyPrimary:!useAdminRecovery && !old.chatCredentialId,
+      recoveryStaleSource:useAdminRecovery,
       from:fromChatUrl,to:targetKey,
       next:{...next,active:true,bootstrapDone:true},
       sourceWasActive:!!old.active,
@@ -1692,7 +1723,9 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       case 'network:migrate':
         if(sender?.tab) throw Error('Перенос доступен только из popup.');
         return lifecycle(()=>migrateAgent(
-          message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination
+          message.tabId,message.agentId,message.fromChatUrl,message.expectedDestination,
+          message.expectedServerTokenId,message.expectedServerChatUrl,
+          message.allowTakeover===true
         ));
       case 'network:unlink':
         if(sender?.tab) throw Error('Отвязка доступна только из popup.');

@@ -303,6 +303,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('confirm-migration').addEventListener('click', async () => {
     if(!confirmedPreview) return;
     const preview=confirmedPreview;
+    if(preview.takeover && !confirm(
+      'ВНИМАНИЕ: агент сейчас активен в другом чате: '+
+      preview.serverSourceChatUrl+
+      '. Подтвердить отключение ИМЕННО ЭТОГО чата и перенос агента сюда?'
+    )) return;
     $('confirm-migration').disabled=true;
     $('start').disabled=true;
     try {
@@ -310,6 +315,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const result=await request('network:migrate',{
         agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
         expectedDestination:preview.toChatUrl,
+        expectedServerTokenId:preview.serverSourceTokenId,
+        expectedServerChatUrl:preview.serverSourceChatUrl,
+        allowTakeover:preview.takeover===true,
       });
       cancelPreview();
       await refresh();
@@ -340,6 +348,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         $('migration-description').textContent=
           'Перенести '+preview.name+' из '+preview.fromChatUrl+
           ' в этот чат? Старый чат перестанет получать PUSH-сообщения.'+
+          (preview.takeover
+            ? '\nВНИМАНИЕ: на сервере агент сейчас привязан к ДРУГОМУ чату: '+
+              preview.serverSourceChatUrl+
+              '. Перенос отключит этот действующий чат. Будет дополнительное подтверждение.'
+            : '')+
           (preview.rotatesPrimary
             ? '\nУ этого старого агента основной токен. При успешном переносе '+
               'сервер автоматически отзовёт его и выдаст новый токен '+

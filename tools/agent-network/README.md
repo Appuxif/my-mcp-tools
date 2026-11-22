@@ -627,14 +627,20 @@ The schedule requires no server restart or Notion API key in the extension.
 An existing Agent Network agent can move to a fresh ChatGPT conversation
 without creating a new server identity. The name, agent ID, profile, teams,
 inbox, message history, saved compact context and task status are preserved.
-**The chat token is replaced**, not copied. This requires a chat-scoped
-credential (chatCredentialId), introduced in v0.8.0, and a connected
-extension administrator token.
+**The chat token is replaced**, not copied. The extension supports both
+legacy primary tokens and modern chat-scoped credentials (introduced in
+v0.8.0), using its configured administrator token.
 
 1. Open another ChatGPT conversation, either with a valid conversation ID
    or a blank/new-chat page. Select the existing agent in the extension.
-2. Press **Start**, inspect the source and destination and explicitly confirm
-   migration. Active PUSH in the old chat is temporarily suspended.
+2. Press **Start**. The extension fetches the authoritative current source
+   chat and displays it before confirmation. If the current server-owned
+   chat is **different** from the source recorded locally, the popup names
+   that other chat and demands an additional explicit confirmation before
+   revoking its token. The server verifies the exact confirmed source ID
+   and URL at prepare time (compare-and-swap); intervening rebinds return
+   HTTP 409 without revoking anybody. Active PUSH for the source is then
+   temporarily suspended.
 3. If the destination is a new-chat page without a conversation ID, the
    extension sends a harmless **secret-free introductory message** to create
    the new conversation. After ChatGPT assigns a stable ID, it waits until
@@ -728,9 +734,12 @@ using its existing authenticated admin catalog, asks the server to stage a
 replacement credential against the CURRENT server-side binding, and moves
 the identity without requiring any manual token rotation or rebinding.
 The old, invalid token is never sent to the destination. On success the
-server invalidates the previous scoped credential, or rotates its current
-primary if no scoped lease exists; on failure the previous server binding
-is unchanged. Old local PUSH is disabled while recovery proceeds.
+server invalidates the previous scoped credential; **if no scoped lease
+remains, the server issues a new scoped chat token without changing the
+still-valid global primary token used by unrelated clients.** Only
+explicit migration of a *verified* legacy primary-bearing source chat
+rotates that primary. On failure the previous server binding is unchanged.
+Old local PUSH is disabled while recovery proceeds.
 If the agent is gone from the admin catalog, or the admin credential is
 unavailable, no new token is issued.
 

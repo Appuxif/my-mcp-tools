@@ -13,7 +13,8 @@ const EXISTING={
   agentId:'agent-uuid',chatUrl:SOURCE,active:true,
 };
 function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
-  deletedBound=false,bindConflictOnce=false,legacyPrimary=false}={}) {
+  deletedBound=false,bindConflictOnce=false,legacyPrimary=false,
+  takeover=false,allowTakeover=true}={}) {
   const elements=new Map();
   const el=id=>{
     if(!elements.has(id)){
@@ -78,7 +79,10 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
           if(!agent) return {ok:false,error:'Agent not found'};
           return {ok:true,migrate:true,agentId:agent.agentId,name:agent.name,
             fromChatUrl:agent.chatUrl,toChatUrl:DEST,needsNewChat:true,
-            rotatesPrimary:legacyPrimary};
+            rotatesPrimary:legacyPrimary,takeover,
+            serverSourceTokenId:takeover?'remote-C-credential':null,
+            serverSourceChatUrl:takeover?
+              'https://chatgpt.com/c/live-foreign-C':null};
         }
         case 'network:migrate':
           if(migrateFails)return {ok:false,error:'Failed validation'};
@@ -113,7 +117,7 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
   };
   vm.runInNewContext(code,{document,chrome,URL,console,
     navigator:{clipboard:{async writeText(value){copied.push(value);}}},
-    confirm(){return true;},
+    confirm(){return allowTakeover;},
   });
   const click=async id=>{
     const callback=el(id).listeners.click;
@@ -160,6 +164,31 @@ test('legacy primary migration preview confirms automatic rotation, not manual D
   await ui.click('confirm-migration');
   assert.equal(ui.messages.filter(m=>m.type==='network:migrate').length,1);
   assert.equal(ui.el('migration-confirm').hidden,true);
+});
+
+test('foreign C takeover is clearly displayed and requires separate explicit consent',async()=>{
+  const denied=createPopup({takeover:true,allowTakeover:false});
+  await denied.ready();
+  denied.setName('Existing-Worker');
+  await denied.click('start');
+  assert.match(denied.el('migration-description').textContent,
+               /ДРУГОМУ чату/);
+  assert.match(denied.el('migration-description').textContent,
+               /live-foreign-C/);
+  await denied.click('confirm-migration');
+  assert.equal(denied.messages.some(m=>m.type==='network:migrate'),false,
+    'Declining takeover must not migrate agent');
+
+  const allowed=createPopup({takeover:true,allowTakeover:true});
+  await allowed.ready();
+  allowed.setName('Existing-Worker');
+  await allowed.click('start');
+  await allowed.click('confirm-migration');
+  const call=allowed.messages.find(m=>m.type==='network:migrate');
+  assert.equal(call.allowTakeover,true);
+  assert.equal(call.expectedServerTokenId,'remote-C-credential');
+  assert.equal(call.expectedServerChatUrl,
+               'https://chatgpt.com/c/live-foreign-C');
 });
 
 test('Confirm transfers selected existing agent without creating a new one',async()=>{

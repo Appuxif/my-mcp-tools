@@ -38,7 +38,7 @@ function networkHarness({
   let nextIntervalId=1;
   let remainingBusyProbes=initialBusyProbes;
   let primerSubmitted=false;
-  let bindingLookupDown=reconcileUnavailable;
+  let bindingLookupDown=false; // outage starts at commit, not at preview
   let remoteLeaseCleared=false;
   let remoteAgentDeleted=false;
   let foreignLease=remoteForeignLease;
@@ -164,6 +164,19 @@ function networkHarness({
         if(transferConflict)
           return {ok:false,status:409,async json(){return {detail:'Destination chat already bound'}}};
         const body=JSON.parse(options.body);
+        if(body.admin_recovery && body.expected_source_token_id!==undefined) {
+          const lease=foreignLease || (remoteLeaseCleared
+            ? {token_id:null,chat_url:null}
+            : Object.entries(data.agentsByChat).map(([url,record])=>({
+              token_id:record.chatCredentialId||null,
+              chat_url:record.chatCredentialId?url:null,
+            })).find(row=>row.token_id) || {token_id:null,chat_url:null});
+          if(body.expected_source_token_id!==lease.token_id ||
+             body.expected_source_chat_url!==lease.chat_url)
+            return {ok:false,status:409,async json(){return {
+              detail:'Server chat binding changed; repeat migration preview',
+            }}};
+        }
         if(body.legacy_primary_token) {
           if(body.legacy_primary_token!=='PRIVATE_AGENT_SECRET' ||
              body.source_token_id || !legacyPrimaryValid)
@@ -175,6 +188,7 @@ function networkHarness({
         }}};
       }
       if(url.endsWith('/commit') && options.method==='POST'){
+        if(reconcileUnavailable) bindingLookupDown=true;
         if(failTransferCommit)
           return {ok:false,status:409,async json(){return {detail:'Source binding changed during transfer'}}};
         if(commitDuringAbort) {
@@ -878,6 +892,86 @@ test('legacy primary 403 also migrates via admin without sending stale secret',a
   assert.equal(h.data.agentsByChat[OTHER].agentId,preview.agentId);
   const sent=h.events.filter(e=>e.type==='agent:send' && e.tabId===11).at(-1).body.text;
   assert.equal(sent.includes('token: PRIVATE_AGENT_SECRET'),false);
+});
+
+test('revoked scoped A with empty server lease migrates without rotating valid global P',async()=>{
+  const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true});
+  await h.start(10);
+  h.clearRemoteLease(); // Server expired A's scoped lease, primary P remains.
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  assert.equal(preview.serverSourceTokenId,null);
+  assert.equal(preview.takeover,false);
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+    expectedServerTokenId:preview.serverSourceTokenId,
+    expectedServerChatUrl:preview.serverSourceChatUrl,
+  });
+  assert.equal(outcome.ok,true,outcome.error);
+  assert.equal(h.legacyPrimaryValid,true,'valid global P must not be rotated');
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,preview.agentId);
+  const request=JSON.parse(h.events.find(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers')).body);
+  assert.equal(request.admin_recovery,true);
+  assert.equal(request.expected_source_token_id,null);
+  assert.equal(request.expected_source_chat_url,null);
+});
+
+test('foreign C cannot be disconnected by an unconfirmed stale A migration',async()=>{
+  const c='https://chatgpt.com/c/33333333-3333-3333-3333-333333333333';
+  const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true,
+    remoteForeignLease:{agent_id:'uuid-identity-1',
+      token_id:'external-chat-token-C',chat_url:c}});
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  assert.equal(preview.takeover,true);
+  assert.equal(preview.serverSourceChatUrl,c);
+  const denied=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+  });
+  assert.equal(denied.ok,false);
+  assert.match(denied.error,/другом чате/);
+  assert.equal(h.events.filter(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers')).length,0);
+  const confirmed=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+    expectedServerTokenId:preview.serverSourceTokenId,
+    expectedServerChatUrl:preview.serverSourceChatUrl,
+    allowTakeover:true,
+  });
+  assert.equal(confirmed.ok,true,confirmed.error);
+  assert.equal(h.data.agentsByChat[PLAIN],undefined);
+  assert.equal(h.data.agentsByChat[OTHER].agentId,preview.agentId);
+  const request=JSON.parse(h.events.find(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers')).body);
+  assert.equal(request.admin_recovery,true);
+  assert.equal(request.expected_source_chat_url,c);
+  assert.equal(request.expected_source_token_id,'external-chat-token-C');
+});
+
+test('foreign server lease changes after preview: takeover must be refused',async()=>{
+  const c='https://chatgpt.com/c/33333333-3333-3333-3333-333333333333';
+  const d='https://chatgpt.com/c/44444444-4444-4444-4444-444444444444';
+  const h=networkHarness({urls:[PROJECT,OTHER],verifyFails:true,
+    remoteForeignLease:{agent_id:'uuid-identity-1',
+      token_id:'external-chat-token-C',chat_url:c}});
+  await h.start(10);
+  const preview=await h.popupRequest(11,'network:migration-preview',{name:'Same-Agent'});
+  h.assignForeignLease(d);
+  const outcome=await h.popupRequest(11,'network:migrate',{
+    agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
+    expectedDestination:preview.toChatUrl,
+    expectedServerTokenId:preview.serverSourceTokenId,
+    expectedServerChatUrl:preview.serverSourceChatUrl,
+    allowTakeover:true,
+  });
+  assert.equal(outcome.ok,false);
+  assert.match(outcome.error,/Привязка агента изменилась/);
+  assert.equal(h.events.filter(e=>e.method==='POST' &&
+    e.url?.endsWith('/chat-transfers')).length,0);
 });
 
 test('stale token with server rejection aborts safely without reviving PUSH',async()=>{

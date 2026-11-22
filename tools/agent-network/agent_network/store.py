@@ -1023,7 +1023,9 @@ class Store:
     def prepare_chat_transfer(self, agent_id: str, source_token_id: str,
                               old_chat_url: str, new_chat_url: str,
                               *, legacy_primary_token: str = "",
-                              admin_recovery: bool = False) -> dict:
+                              admin_recovery: bool = False,
+                              expected_source_token_id: str | None = None,
+                              expected_source_chat_url: str | None = None) -> dict:
         """Reserve the destination and return an INACTIVE bearer for bootstrap."""
         if old_chat_url == new_chat_url:
             raise ValueError("Source and destination must be different")
@@ -1042,13 +1044,21 @@ class Store:
                     "SELECT token_id,chat_url FROM agent_chat_tokens WHERE agent_id=?",
                     (agent_id,),
                 ).fetchone()
+                # Only migrate the EXACT lease shown in the popup preview.
+                # Never silently take over chat C after confirming chat A.
+                current_id = current["token_id"] if current else None
+                current_url = current["chat_url"] if current else None
+                if (expected_source_token_id != current_id or
+                        expected_source_chat_url != current_url):
+                    raise ValueError("Server chat binding changed; repeat migration preview")
                 if current is not None:
-                    source_token_id = current["token_id"]
-                    old_chat_url = current["chat_url"]
+                    source_token_id = current_id
+                    old_chat_url = current_url
                 else:
-                    # Old primary may already have been rotated; rotate the
-                    # CURRENT primary atomically when the destination commits.
-                    source_token_id = "primary:" + agent["token_hash"]
+                    # A stale scoped ChatGPT credential must never rotate the
+                    # agent's unrelated PRIMARY token. Bind B while preserving
+                    # the PRIMARY hash, and CAS that hash on commit.
+                    source_token_id = "recovery-empty:" + agent["token_hash"]
             elif legacy_primary_token:
                 # v0.7 and earlier injected the identity's permanent primary
                 # bearer into ChatGPT. Never copy it to another chat. Reserve
@@ -1117,14 +1127,17 @@ class Store:
             if pending is None:
                 raise ValueError("Chat transfer missing or expired")
             legacy = pending["source_token_id"].startswith("primary:")
-            if legacy:
+            empty_recovery = pending["source_token_id"].startswith("recovery-empty:")
+            if legacy or empty_recovery:
                 agent = self._agent(agent_id)
                 # Check the *exact* primary used when the transfer was
                 # prepared: an admin rotation invalidates the staged token.
                 if not secrets.compare_digest(
-                    agent["token_hash"], pending["source_token_id"][8:]
+                    agent["token_hash"],
+                    pending["source_token_id"][8:] if legacy
+                    else pending["source_token_id"][15:]
                 ):
-                    raise ValueError("Legacy primary credential changed")
+                    raise ValueError("Primary credential changed during transfer")
                 if self.db.execute(
                     "SELECT 1 FROM agent_chat_tokens WHERE agent_id=?",
                     (agent_id,),
@@ -1143,14 +1156,15 @@ class Store:
                 (pending["dest_chat_url"],),
             ).fetchone():
                 raise ValueError("Destination chat already bound")
-            if legacy:
-                # One atomic transaction rotates away the primary credential
-                # embedded in chat A, and authorizes only chat B's fresh scoped
-                # bearer. Preserve the agent ID, history, teams and context.
-                self.db.execute(
-                    "UPDATE agents SET token_hash=?,updated_at=? WHERE agent_id=?",
-                    (digest(secrets.token_urlsafe(32)), now(), agent_id),
-                )
+            if legacy or empty_recovery:
+                # Rotate permanent primary only if this transfer originated
+                # from an authenticated legacy PRIMARY bearer in chat A.
+                # Expired SCOPED recovery must leave the global primary valid.
+                if legacy:
+                    self.db.execute(
+                        "UPDATE agents SET token_hash=?,updated_at=? WHERE agent_id=?",
+                        (digest(secrets.token_urlsafe(32)), now(), agent_id),
+                    )
                 stamp = now()
                 self.db.execute(
                     "INSERT INTO agent_chat_tokens "

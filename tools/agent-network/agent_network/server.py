@@ -76,6 +76,8 @@ class AgentChatTransferRequest(BaseModel):
     new_chat_url: str
     legacy_primary_token: str = ""
     admin_recovery: bool = False
+    expected_source_token_id: str | None = None
+    expected_source_chat_url: str | None = None
 
 
 class ExtensionChatAgentCreate(BaseModel):
@@ -843,6 +845,8 @@ def create_app(config: Config | None = None) -> FastAPI:
                 body.old_chat_url, body.new_chat_url,
                 legacy_primary_token=body.legacy_primary_token,
                 admin_recovery=body.admin_recovery,
+                expected_source_token_id=body.expected_source_token_id,
+                expected_source_chat_url=body.expected_source_chat_url,
             )
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
