@@ -107,7 +107,7 @@ test('Start registers the chat without showing the floating HUD',async()=>{
   assert.equal(result.created,true);
   assert.equal(x.events.filter(e=>e.type==='network:hud-show').length,0);
   assert.equal(x.events.filter(e=>e.kind==='inject').length,0);
-  assert.equal(x.events.filter(e=>e.type==='agent:send').length,1);
+  assert.equal(x.events.filter(e=>e.type==='agent:send').length,0);
   assert.equal(x.data.agentsByChat[CHAT].active,true);
   assert.equal(x.data.agentsByChat[CHAT].bootstrapDone,true);
 });

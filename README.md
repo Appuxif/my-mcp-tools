@@ -140,8 +140,12 @@ deleting the agent's messages or saved context.
 The Basic-protected Agent Network Dashboard has a read-only Notes table
 with parent/subnote detail windows for the 48-hour temporary records.
 
-Chrome Extension **v0.8.0** can resend the original identity bootstrap on
-request and includes the bound agent ID/token in wake prompts. Keep tokens
+Chrome Extension **v0.8.0+** binds agents to ChatGPT conversations without
+injecting an initialization prompt or waiting for an idle model. The first
+PUSH introduces the agent ID/token; the popup also offers a manual
+instructions button. For blank chats, the popup asks the user to confirm
+the actual conversation URL after their first normal message; clicking a
+sidebar chat cannot silently redirect a pending binding. Keep tokens
 private and out of Git and inter-agent messages. Agent Network remains
 optional and is never auto-enabled by the bridge.
 

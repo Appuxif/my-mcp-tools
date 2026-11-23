@@ -122,6 +122,17 @@ async function refresh() {
     $('show-hud').disabled = !s.entry;
     $('unlink').disabled = !s.entry || !!s.pendingTransfer;
     $('repeat-bootstrap').disabled = !s.entry;
+    $('cancel-deferred').hidden = !s.deferredBinding ||
+      s.deferredBinding.state==='processing';
+    $('cancel-deferred').textContent =
+      (s.deferredBinding?.state==='recovery_required' ||
+       s.deferredBinding?.state==='recovery_retry')
+        ? 'Сбросить ожидание (сервер не изменится)'
+        : 'Отменить ожидание чата';
+    $('confirm-deferred').hidden =
+      s.deferredBinding?.state!=='confirm_destination';
+    $('confirm-deferred').disabled =
+      s.deferredBinding?.state!=='confirm_destination';
     $('agent-id-row').hidden = !s.entry;
     $('agent-token-row').hidden = !s.entry;
     $('agent-id').value = s.entry?.agentId || '';
@@ -153,8 +164,28 @@ async function refresh() {
          'Состояние: ' + (s.ui?.state || 'неизвестно'),
          'Сеть: ' + (s.ui?.network || 'нет данных') +
            ' · ' + (s.ui?.activeRequests ?? 0) + ' запросов',
-         s.entry.bootstrapDone ? '' : 'Требуется инициализация чата'].filter(Boolean).join('\n')
-      : 'Этот чат пока не привязан к агенту. Выбери существующего по имени для переноса или создай нового.');
+         s.entry.bootstrapDone ? '' : 'Привязка ожидает подтверждения сервера'].filter(Boolean).join('\n')
+      : s.deferredBinding
+        ? s.deferredBinding.state==='failed'
+          ? 'Отложенная привязка не удалась: '+s.deferredBinding.error+
+            '\nОтмени ожидание и повтори привязку.'
+          : s.deferredBinding.state==='confirm_destination'
+            ? 'Подтверди целевую беседу: '+s.deferredBinding.targetUrl+
+              '\nПривязка изменит токен или создаст агента только после этого подтверждения.'
+            : s.deferredBinding.state==='processing'
+              ? 'Привязка уже выполняется на сервере; отмена недоступна.'
+              : s.deferredBinding.state==='recovery_retry'
+                ? 'Восстановление временно невозможно: '+s.deferredBinding.error+
+                  '\nРасширение автоматически повторит проверку сервера, когда связь появится. '+
+                  'Операция привязки НЕ повторяется без подтверждения.'
+                : s.deferredBinding.state==='recovery_required'
+                ? 'После перезапуска результат операции неизвестен: '+
+                  s.deferredBinding.error+
+                  '\nМожно сбросить только локальное ожидание. Это НЕ отзовёт '+
+                  'серверную привязку. Проверь каталог агентов и перепривяжи при необходимости.'
+                : 'Привязка запланирована. Отправь первое сообщение в пустом чате. '+
+                  'После появления ID беседы подтверди точный URL, чтобы исключить перенос в чужой чат.'
+        : 'Этот чат пока не привязан к агенту. Выбери существующего по имени для переноса или создай нового.');
     await refreshAdmin();
     await refreshSchedule();
   } catch (e) { show(String(e.message || e)); }
@@ -296,6 +327,44 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('name').addEventListener('input', fillExisting);
   for(const field of ['role','purpose','description'])
     $(field).addEventListener('input', cancelPreview);
+  $('cancel-deferred').addEventListener('click',async()=>{
+    try {
+      const result=await request('network:cancel-deferred');
+      await refresh();
+      show(result.cancelled
+        ? 'Ожидание создания чата отменено.'
+        : result.reason==='in_progress'
+          ? 'Привязка уже выполняется на сервере. Отмена невозможна.'
+          : result.reason==='recovery_reset'
+            ? 'Сброшена только локальная операция. На сервере привязка могла '+
+              'успеть завершиться — проверь каталог, затем перепривяжи при необходимости.'
+            : 'Отложенная операция уже завершена или отменена.');
+    } catch(error) {show(String(error.message||error));}
+  });
+  $('confirm-deferred').addEventListener('click',async()=>{
+    const status=await request('network:status');
+    const target=status.deferredBinding?.targetUrl;
+    if(!target || status.deferredBinding.state!=='confirm_destination') {
+      await refresh();
+      show('Открой беседу с актуальным ID перед подтверждением.');
+      return;
+    }
+    $('confirm-deferred').disabled=true;
+    try {
+      const result=await request('network:confirm-deferred',{
+        expectedDestination:target,
+      });
+      await refresh();
+      show(result.linked
+        ? 'Агент привязан к подтверждённому чату без отправки инструкций.'
+        : 'Привязка не подтверждена сервером.');
+    } catch(error) {
+      await refresh();
+      show('Привязка не завершена: '+String(error.message||error));
+    } finally {
+      $('confirm-deferred').disabled=false;
+    }
+  });
   $('cancel-migration').addEventListener('click', () => {
     cancelPreview();
     show('Перенос отменён. Исходный агент остался в прежнем чате.');
@@ -311,7 +380,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     $('confirm-migration').disabled=true;
     $('start').disabled=true;
     try {
-      show('Инициализирую агента в новом чате и переношу PUSH…');
+      show('Привязываю агента к новому чату без отправки сообщений…');
       const result=await request('network:migrate',{
         agentId:preview.agentId,fromChatUrl:preview.fromChatUrl,
         expectedDestination:preview.toChatUrl,
@@ -321,8 +390,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
       cancelPreview();
       await refresh();
-      show('Агент '+result.name+' перенесён в новый чат. ID и история Agent Network сохранены.'+
-        (result.connectionWarning ? '\n'+result.connectionWarning : ''));
+      show(result.deferred
+        ? 'Перенос '+result.name+' запланирован. Отправь первое сообщение в этом чате, '+
+          'затем подтверди его точный URL в расширении — даже если ChatGPT занят.'
+        : 'Агент '+result.name+' перенесён без отправки инструкций. ID и история Agent Network сохранены.'+
+          (result.connectionWarning ? '\n'+result.connectionWarning : ''));
     } catch(error) { show(String(error.message||error)); }
     finally {
       $('confirm-migration').disabled=false;
@@ -380,7 +452,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           throw Error('Перепривязка отменена.');
         await request('network:start',{profile:{...toBind,rebind:true}});
       }
+      const state=await request('network:status');
       await refresh();
+      if(state.deferredBinding)
+        show('Привязка запланирована: отправь первое сообщение, чтобы ChatGPT создал ID чата. '+
+             'После этого подтверди фактический URL беседы; инструкции не отправляются.');
     } catch (e) { show(String(e.message || e)); }
     finally { $('start').disabled = false; }
   });

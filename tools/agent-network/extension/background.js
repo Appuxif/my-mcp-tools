@@ -362,6 +362,8 @@ async function wake(tabId, record, ws, msg) {
     await guardedWake(record.agentId, async () => {
       const s = await probe(tabId, record);
       if (s.state !== 'idle') throw Error('chat state: ' + s.state);
+      const current=(await storage())[chatKey(record.chatUrl)];
+      const introduce=current?.identityIntroduced===false;
       const text = [
         '[Agent Network wake]',
         'There are ' + Number(msg.pending_count || 0) + ' pending messages for agent ' + record.name + '.',
@@ -372,9 +374,11 @@ async function wake(tabId, record, ws, msg) {
         'Keep the token private; do not send it in inter-agent messages or logs.',
         'Read and acknowledge messages through MCP, then continue the assigned work.',
         'This is only a wake signal; the message contents are never delivered through the browser.',
-      ].join('\n');
+      ].join('\n')+
+        (introduce
+          ? '\n\n'+bootstrapPrompt(current,current.bootstrapMigrated===true)
+          : '');
       const tab = await chrome.tabs.get(Number(tabId));
-      const current=(await storage())[chatKey(record.chatUrl)];
       if (chatKey(tab?.url) !== chatKey(record.chatUrl) ||
           current?.agentId !== record.agentId || current?.token !== record.token ||
           !current?.active)
@@ -383,6 +387,11 @@ async function wake(tabId, record, ws, msg) {
         type: 'agent:send', text, url: tab.url, wakeId: msg.wake_id,
       });
       if (!result?.ok) throw Error(result?.error || 'Could not submit wake prompt');
+      if(introduce) await updateRecords(entries=>{
+        if(entries[chatKey(record.chatUrl)]?.agentId===record.agentId &&
+           entries[chatKey(record.chatUrl)]?.token===record.token)
+          entries[chatKey(record.chatUrl)].identityIntroduced=true;
+      });
     });
     status = 'submitted';
   } catch (error) {
@@ -805,33 +814,278 @@ async function verifyMigrationAgent(server,record) {
     a.agent_id===record.agentId && a.name===record.name);
 }
 
-async function waitForConversation(tabId, originalUrl, timeoutMs=30000) {
-  const start=Date.now();
-  while(Date.now()-start<timeoutMs) {
-    const tab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
-    if(!tab) throw Error('Вкладка закрылась до создания нового чата.');
-    const key=chatKey(tab.url);
-    if(key) return {tab,key};
-    if(tab.url!==originalUrl)
-      throw Error('Открылась другая страница вместо нового чата.');
-    await new Promise(resolve=>setTimeout(resolve,250));
-  }
-  throw Error('ChatGPT не выдал ID новой беседы. Старый агент сохранён без изменений.');
-}
 const migratingKeys=new Set();
-async function waitForChatIdle(tabId,expectedKey,timeoutMs=90000) {
-  const deadline=Date.now()+timeoutMs;
-  while(Date.now()<deadline) {
-    const tab=await conversationTab(tabId,expectedKey);
-    const readiness=await probe(tabId,{chatUrl:tab.url});
-    if(readiness?.state==='idle') return tab;
-    if(readiness?.state==='draft')
-      throw Error('В новом чате есть черновик или вложение. Перенос отменён.');
-    await new Promise(resolve=>setTimeout(resolve,350));
-  }
-  throw Error('Новый чат ещё генерирует ответ; дождись окончания и повтори перенос.');
+// A blank ChatGPT tab is not a conversation yet. Stage only the human's
+// intent and reveal the actual /c/<id> destination for ANOTHER explicit
+// confirmation. No synthetic message, credential, or server lease is created
+// from URL navigation alone: an unrelated sidebar chat may have the same URL
+// shape as a newly created conversation.
+const DEFERRED_BINDINGS_STORE='deferredChatBindings';
+let deferredWriteQueue=Promise.resolve();
+const deferredLocks=new Set();
+async function deferredChatBindings() {
+  return (await chrome.storage.local.get(DEFERRED_BINDINGS_STORE))[DEFERRED_BINDINGS_STORE] || {};
 }
-
+function mutateDeferredBindings(mutator) {
+  const task=deferredWriteQueue.catch(()=>{}).then(async()=>{
+    const entries=await deferredChatBindings();
+    const result=mutator(entries);
+    await chrome.storage.local.set({[DEFERRED_BINDINGS_STORE]:entries});
+    return result;
+  });
+  deferredWriteQueue=task.catch(()=>{});
+  return task;
+}
+async function queueDeferredChatBinding(tabId,originalUrl,binding) {
+  if(!newChatUrl(originalUrl))
+    throw Error('Для отложенной привязки открой пустой чат ChatGPT.');
+  await mutateDeferredBindings(entries=>{
+    if(binding.agentId && Object.entries(entries).some(([otherTab,existing])=>
+      Number(otherTab)!==Number(tabId) && existing.agentId===binding.agentId &&
+      existing.server===binding.server &&
+      (existing.state==='waiting' || existing.state==='confirm_destination' ||
+       existing.state==='processing')))
+      throw Error('Для этого агента уже ожидается создание новой беседы.');
+    entries[String(tabId)]={
+      ...binding,originalUrl,state:'waiting',createdAt:Date.now(),
+    };
+  });
+}
+async function cancelDeferredChatBinding(tabId) {
+  return mutateDeferredBindings(entries=>{
+    const id=String(tabId),pending=entries[id];
+    if(!pending)
+      return {cancelled:false,reason:'not_pending'};
+    if(pending.state==='processing')
+      return {cancelled:false,reason:'in_progress'};
+    delete entries[id];
+    // A recovery-required reset changes ONLY local UI intent. A previous
+    // server commit may exist, so it is never reported as a cancelled bind.
+    return pending.state==='recovery_required' || pending.state==='recovery_retry'
+      ? {cancelled:false,reason:'recovery_reset'}
+      : {cancelled:true};
+  });
+}
+async function clearCompletedDeferredChatBinding(tabId,createdAt) {
+  await mutateDeferredBindings(entries=>{
+    if(entries[String(tabId)]?.createdAt===createdAt &&
+       entries[String(tabId)]?.state==='processing')
+      delete entries[String(tabId)];
+  });
+}
+async function finishDeferredChatBinding(tabId) {
+  // A navigation to /c/X is NOT proof that ChatGPT created X from the
+  // user's new message. The destination is untrusted until the operator
+  // sees and confirms its exact URL in the popup.
+  const id=String(tabId);
+  const tab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
+  const key=chatKey(tab?.url);
+  if(!key) return;
+  await mutateDeferredBindings(entries=>{
+    const pending=entries[id];
+    if(!pending || pending.state==='processing' ||
+       pending.state==='recovery_retry' || pending.state==='recovery_required' ||
+       pending.state==='failed') return;
+    if(pending.state==='waiting' || pending.state==='confirm_destination') {
+      entries[id]={...pending,state:'confirm_destination',
+        targetChatUrl:key,targetUrl:tab.url};
+    }
+  });
+}
+async function confirmDeferredChatBinding(tabId,expectedDestination) {
+  const id=String(tabId);
+  if(deferredLocks.has(id))
+    throw Error('Привязка уже выполняется.');
+  deferredLocks.add(id);
+  let pending=null;
+  try {
+    const tab=await chrome.tabs.get(Number(tabId));
+    const key=chatKey(tab?.url);
+    if(!key || tab.url!==expectedDestination)
+      throw Error('Целевая беседа изменилась. Открой расширение заново.');
+    pending=await mutateDeferredBindings(entries=>{
+      const item=entries[id];
+      if(!item || item.state!=='confirm_destination' ||
+         item.targetChatUrl!==key || item.targetUrl!==tab.url)
+        throw Error('Подтверждение этой беседы устарело. Повтори выбор.');
+      entries[id]={...item,state:'processing',phase:'preparing'};
+      return {...item};
+    });
+    try {
+      await lifecycle(async()=>{
+        const server=await serverForTab(tabId);
+        if(server!==pending.server)
+          throw Error('Сервер изменился после подтверждения привязки.');
+        const currentTab=await chrome.tabs.get(Number(tabId));
+        if(currentTab?.url!==expectedDestination)
+          throw Error('Целевая беседа изменилась перед привязкой.');
+        await mutateDeferredBindings(entries=>{
+          if(entries[id]?.createdAt===pending.createdAt &&
+             entries[id].state==='processing')
+            entries[id].phase='server_request';
+        });
+        if(pending.kind==='migrate') {
+          const local=(await storage())[key];
+          if(local?.agentId===pending.agentId) return;
+          await migrateAgent(tabId,pending.agentId,pending.fromChatUrl,tab.url,
+            pending.expectedServerTokenId,pending.expectedServerChatUrl,
+            pending.allowTakeover===true);
+        } else if(pending.kind==='start') {
+          const existing=(await storage())[key];
+          if(existing) {
+            if(existing.agentId!==pending.profile.agentId || !existing.active)
+              throw Error('Этот чат уже связан с другим агентом.');
+          } else {
+            await startAgent(tabId,pending.profile);
+          }
+        } else throw Error('Некорректная отложенная операция.');
+      });
+      await mutateDeferredBindings(entries=>{
+        if(entries[id]?.createdAt===pending.createdAt &&
+           entries[id].state==='processing')
+          entries[id].phase='local_committed';
+      });
+      await clearCompletedDeferredChatBinding(tabId,pending.createdAt);
+      return {linked:true};
+    } catch(error) {
+      await mutateDeferredBindings(entries=>{
+        const current=entries[id];
+        if(current?.createdAt===pending.createdAt &&
+           current.state==='processing') {
+          // An HTTP call can succeed server-side even when its response is
+          // lost. Once a request may have started, do NOT claim the
+          // operation failed safely or let Cancel promise a rollback.
+          const sideEffectUncertain=current.phase==='server_request' ||
+            current.phase==='local_committed';
+          entries[id]={...current,
+            state:sideEffectUncertain?'recovery_required':'failed',
+            error:String(error.message||error).slice(0,220)};
+        }
+      });
+      throw error;
+    }
+  } finally {
+    deferredLocks.delete(id);
+  }
+}
+// The durable 'processing' marker survives MV3 worker crashes, while the
+// in-memory deferredLocks set does not. Never blindly replay a side-effecting
+// HTTP call: first compare actual server binding and extension-local state.
+// This path deliberately errs toward explicit manual repair if credentials
+// might have been issued but their plaintext response was lost.
+const deferredRecoveryLocks=new Set();
+// Network/admin availability is not evidence that an issued token was lost.
+// Only repeat read-only authoritative verification after transient failures.
+function transientDeferredRecoveryError(error) {
+  if(error?.retryVerification===true) return true;
+  const status=Number(error?.status);
+  if(status===401 || status===403 || status===408 || status===425 ||
+     status===429 || status>=500) return true;
+  if(['TypeError','AbortError','TimeoutError','NetworkError'].includes(error?.name))
+    return true;
+  return /failed to fetch|fetch failed|server unreachable|networkerror|network error|network request failed|ERR_(?:CONNECTION|NETWORK|INTERNET|TIMED_OUT)|результат серверного переноса ещё не разрешён/i
+    .test(String(error?.message||error));
+}
+async function recoverOrphanDeferredChatBinding(tabId) {
+  const id=String(tabId);
+  if(deferredLocks.has(id) || deferredRecoveryLocks.has(id)) return;
+  const initial=(await deferredChatBindings())[id];
+  if(initial?.state!=='processing' && initial?.state!=='recovery_retry') return;
+  deferredRecoveryLocks.add(id);
+  let state='recovery_required';
+  let explanation='Сбой во время привязки. Проверь серверную привязку перед повторной попыткой.';
+  try {
+    const tab=await chrome.tabs.get(Number(tabId)).catch(()=>null);
+    const key=chatKey(tab?.url);
+    if(!tab || key!==initial.targetChatUrl ||
+       tab.url!==initial.targetUrl)
+      throw Error('Целевой чат изменился или вкладка закрыта.');
+    if(initial.kind==='migrate') await recoverPendingTransfers();
+    const entries=await storage();
+    const dest=entries[key];
+    const admin=await adminToken(initial.server);
+    if(!admin) {
+      const error=Error('Нет admin-доступа для проверки серверной привязки.');
+      error.retryVerification=true;
+      throw error;
+    }
+    if(initial.kind==='migrate') {
+      const remote=await adminRequest(initial.server,admin,
+        '/api/v1/admin/agents/'+encodeURIComponent(initial.agentId)+'/chat-binding');
+      if(remote.agent_id!==initial.agentId)
+        throw Error('Некорректный ответ сервера об агенте.');
+      if(dest?.agentId===initial.agentId && dest.active &&
+         dest.chatCredentialId===remote.token_id &&
+         remote.chat_url===key) {
+        state='complete';
+      } else if((await pendingChatTransfers())[initial.server+'|'+initial.agentId]) {
+        throw Error('Результат серверного переноса ещё не разрешён. Повтори проверку.');
+      } else if(!dest && entries[initial.fromChatUrl]?.agentId===initial.agentId &&
+                remote.token_id===initial.expectedServerTokenId &&
+                remote.chat_url===initial.expectedServerChatUrl) {
+        state='confirm_destination';
+        explanation='Сервер сохранил исходную привязку; подтверди URL ещё раз для переноса.';
+      } else throw Error('Привязка на сервере изменилась или токен назначения недоступен. '+
+        'Сбрось ожидание и восстанови агента через каталог и перепривязку.');
+    } else if(initial.kind==='start') {
+      const sameLocal=dest && dest.active &&
+        dest.name===initial.profile?.name &&
+        (!initial.profile?.agentId || dest.agentId===initial.profile.agentId);
+      if(sameLocal) {
+        // Existing local credentials are present. Validate exact server lease.
+        const remote=await adminRequest(initial.server,admin,
+          '/api/v1/admin/agents/'+encodeURIComponent(dest.agentId)+'/chat-binding');
+        if(remote.agent_id===dest.agentId &&
+           remote.token_id===dest.chatCredentialId && remote.chat_url===key)
+          state='complete';
+        else throw Error('Локальный токен не соответствует серверной привязке.');
+      } else if(dest) {
+        throw Error('Чат имеет неполную привязку. Восстанови её через повторный Старт.');
+      } else if(initial.profile?.agentId) {
+        const remote=await adminRequest(initial.server,admin,
+          '/api/v1/admin/agents/'+encodeURIComponent(initial.profile.agentId)+'/chat-binding');
+        if(remote.agent_id!==initial.profile.agentId)
+          throw Error('Сервер вернул неправильного агента.');
+        if(remote.token_id===null && remote.chat_url===null) {
+          state='confirm_destination';
+          explanation='У агента нет действующей привязки. Подтверди URL для повторной попытки.';
+        } else throw Error('Сервер уже выдал токен этому агенту, но локальный токен утерян. '+
+          'Сбрось ожидание и явно перепривяжи агента через каталог.');
+      } else {
+        const catalogue=await adminRequest(initial.server,admin,'/api/v1/admin/agents');
+        if(!Array.isArray(catalogue.items)) throw Error('Каталог агентов недоступен.');
+        const matches=catalogue.items.filter(agent=>
+          agent.kind==='chatgpt' && agent.name===initial.profile?.name);
+        if(matches.length===0) {
+          state='confirm_destination';
+          explanation='Агент не создан. Подтверди URL для безопасной повторной регистрации.';
+        } else throw Error('Агент с этим именем уже создан на сервере, '+
+          'но его локальный токен отсутствует. Сбрось ожидание и привяжи его через каталог.');
+      }
+    } else throw Error('Некорректный тип отложенной операции.');
+  } catch(error) {
+    explanation=String(error.message||error).slice(0,220);
+    if(transientDeferredRecoveryError(error)) state='recovery_retry';
+  } finally {
+    await mutateDeferredBindings(entries=>{
+      const existing=entries[id];
+      if(existing?.createdAt!==initial.createdAt ||
+         (existing.state!=='processing' && existing.state!=='recovery_retry')) return;
+      if(state==='complete') delete entries[id];
+      else entries[id]={...existing,state,error:explanation,
+        phase:state==='recovery_retry'?existing.phase:'reconciled'};
+    });
+    deferredRecoveryLocks.delete(id);
+  }
+}
+async function finishAllDeferredChatBindings() {
+  const items=await deferredChatBindings();
+  for(const id of Object.keys(items)) {
+    if(items[id]?.state==='processing' || items[id]?.state==='recovery_retry')
+      await recoverOrphanDeferredChatBinding(Number(id));
+    else await finishDeferredChatBinding(Number(id));
+  }
+}
 const PENDING_TRANSFER_STORE='pendingChatTransfers';
 let pendingTransferWriteQueue=Promise.resolve();
 function pendingTransferKey(record) {
@@ -1088,6 +1342,16 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
        expectedServerChatUrl!==binding.chat_url))
     throw Error('Агент уже работает в другом чате: '+binding.chat_url+
       '. Сначала подтверди перенос именно из этого чата.');
+  // A blank /project page has no permanent conversation ID yet. Do not
+  // inject a synthetic message into the user's composer just to create one.
+  if(!targetKey) {
+    await queueDeferredChatBinding(tabId,tab.url,{
+      kind:'migrate',server,agentId:old.agentId,
+      fromChatUrl,expectedServerTokenId:binding.token_id,
+      expectedServerChatUrl:binding.chat_url,allowTakeover,
+    });
+    return {deferred:true,agentId:old.agentId,name:old.name};
+  }
   const oldTokenValid=await verifyMigrationAgent(server,old);
   const useAdminRecovery=!oldTokenValid ||
     binding.token_id!==(old.chatCredentialId||null) ||
@@ -1111,22 +1375,7 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
     });
   }
 
-  // Before a new ChatGPT conversation has a /c/ URL, create it with a
-  // completely secret-free message. Do not bootstrap the old bearer.
-  if(!targetKey) {
-    const created=await askTab(tabId,{
-      type:'agent:send',
-      text:'Agent Network: подготовка беседы для переноса агента. '+
-        'Ожидай отдельного сообщения с новыми инструкциями.',
-      url:tab.url,allowNewChat:true,
-    });
-    if(!created?.ok)
-      throw Error('Не удалось создать новый чат: '+(created?.error||'unknown'));
-    const destination=await waitForConversation(tabId,tab.url);
-    targetKey=destination.key;
-    await waitForChatIdle(tabId,targetKey);
-  }
-  const destinationBefore=await conversationTab(tabId,targetKey);
+  await conversationTab(tabId,targetKey);
   if(targetKey===fromChatUrl || (await storage())[targetKey])
     throw Error('Целевая беседа изменилась или уже содержит агента.');
 
@@ -1161,16 +1410,11 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
       } : {}),
       token:prepared.token,chatCredentialId:prepared.transfer_id,
       chatUrl:targetKey,ownerTabId:Number(tabId),
-      active:false,bootstrapDone:false,bootstrapMigrated:true,
+      active:false,bootstrapDone:true,bootstrapMigrated:true,
+      identityIntroduced:false,
     };
-    // Staged bearer is NOT authorized by Store.verify until commit.
-    // Any failed/ambiguous send can be aborted without revoking A.
-    const sent=await askTab(tabId,{
-      type:'agent:send',text:bootstrapPrompt(next,true),
-      url:destinationBefore.url,allowNewChat:false,
-    });
-    if(!sent?.ok)
-      throw Error('Новый чат не принял инициализацию: '+(sent?.error||'unknown'));
+    // Commit the lease as soon as the destination URL has been verified.
+    // No ChatGPT composer interaction or busy/idle check is required.
     await conversationTab(tabId,targetKey);
     if((await storage())[targetKey])
       throw Error('Целевая беседа уже занята во время переноса.');
@@ -1181,7 +1425,7 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
       legacyPrimary:!useAdminRecovery && !old.chatCredentialId,
       recoveryStaleSource:useAdminRecovery,
       from:fromChatUrl,to:targetKey,
-      next:{...next,active:true,bootstrapDone:true},
+      next:{...next,active:true,bootstrapDone:true,identityIntroduced:false},
       sourceWasActive:!!old.active,
     };
     // Persist before POST commit so an ambiguous result cannot resurrect
@@ -1255,7 +1499,18 @@ async function migrateAgent(tabId,expectedAgentId,fromChatUrl,expectedDestinatio
 const startLocks = new Map();
 async function startAgent(tabId, profile) {
   const {tab,key}=await currentRecord(tabId);
-  if (!key) throw Error('Open an existing ChatGPT conversation (not the homepage)');
+  if (!key) {
+    const tab=await chrome.tabs.get(Number(tabId));
+    if(!newChatUrl(tab?.url))
+      throw Error('Открой чат ChatGPT.');
+    const server=await serverForTab(tabId);
+    if(!await adminToken(server))
+      throw Error('Для привязки агента сначала авторизуй admin-token в расширении.');
+    await queueDeferredChatBinding(tabId,tab.url,{
+      kind:'start',server,profile,
+    });
+    return {deferred:true,name:profile.name};
+  }
   const previous = startLocks.get(key) || Promise.resolve();
   const operation = previous.catch(()=>{}).then(()=>registerConversation(tabId,profile));
   startLocks.set(key,operation);
@@ -1319,8 +1574,8 @@ async function registerConversation(tabId, profile) {
         purpose:result.agent.purpose,description:result.agent.description,
         kind:result.agent.kind,teams:result.agent.teams,
         agentId:result.agent_id,token:result.token,chatCredentialId:result.token_id,
-        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
-        bootstrapMigrated:false,
+        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:true,
+        bootstrapMigrated:false,identityIntroduced:false,
       };
     } else {
       // Never inject a newly-created agent's permanent primary token into
@@ -1335,78 +1590,41 @@ async function registerConversation(tabId, profile) {
         purpose:result.agent.purpose,description:result.agent.description,
         kind:'chatgpt',teams:result.agent.teams,
         agentId:result.agent.agent_id,token:result.token,chatCredentialId:result.token_id,
-        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:false,
-        bootstrapMigrated:false,
+        chatUrl:key,ownerTabId:null,server,active:false,bootstrapDone:true,
+        bootstrapMigrated:false,identityIntroduced:false,
       };
     }
     created=true;
   }
 
-  // Persist a newly issued identity before any further awaits, but do not
-  // activate it until the bootstrap was delivered to its original conversation.
-  // Failed or abandoned registration can then be safely resumed on next Start.
-  try {
-    await conversationTab(tabId,key);
-  } catch(error) {
+  // The server lease is already authoritative. Do not wait for ChatGPT
+  // to be idle or send any prompt as a registration prerequisite.
+  try {await conversationTab(tabId,key);}
+  catch(error) {
     if(created) await updateRecords(entries=>{
-      if(!entries[key] || entries[key].agentId===old?.agentId)
-        entries[key]={...record,active:false,ownerTabId:null,bootstrapDone:false};
+      if(!entries[key]) entries[key]={...record,active:false,ownerTabId:null};
     });
     throw error;
   }
-
   await updateRecords(entries=>{
     if(old && entries[key]?.agentId!==old.agentId)
       throw Error('Agent binding changed during registration');
     if(!old && entries[key])
       throw Error('Conversation was bound to another agent during registration');
     entries[key]={
-      ...record,active:wasActive && !created,
-      ownerTabId:wasActive && !created ? old.ownerTabId : null,
+      ...record,bootstrapDone:true,active:true,
+      ownerTabId:(!wasActive || created) ? Number(tabId) : old.ownerTabId,
     };
   });
-
+  record=(await storage())[key];
   try {
-    if (!record.bootstrapDone) {
-      const tab=await conversationTab(tabId,key);
-      const sent=await askTab(tabId,{
-        type:'agent:send',text:bootstrapPrompt(record,record.bootstrapMigrated===true),url:tab.url,
-      });
-      if(!sent?.ok)
-        throw Error('Registered, but initialization prompt was not sent: '+(sent?.error||'unknown'));
-      await conversationTab(tabId,key); // Navigation can happen while send() awaits.
-      record={...record,bootstrapDone:true};
-      await updateRecords(entries=>{
-        if(entries[key]?.agentId!==record.agentId)
-          throw Error('Agent binding changed during bootstrap');
-        entries[key].bootstrapDone=true;
-      });
-    }
-
-    await conversationTab(tabId,key);
-    record=await updateRecords(entries=>{
-      if(entries[key]?.agentId!==record.agentId)
-        throw Error('Agent binding changed during activation');
-      entries[key].active=true;
-      if(!wasActive || created) entries[key].ownerTabId=Number(tabId);
-      return {...entries[key]};
-    });
     await connect(tabId,record);
-    await conversationTab(tabId,key);
-    return {agentId:record.agentId,name:record.name,created:created&&!profile.agentId,linked:!!profile.agentId};
   } catch(error) {
-    if(!wasActive || created) {
-      // Do not leave an uninitialized or abandoned agent active. In
-      // particular, a late send response must never resurrect a moved tab.
-      await updateRecords(entries=>{
-        if(entries[key]?.agentId!==record.agentId) return;
-        entries[key].active=false;
-        entries[key].ownerTabId=null;
-      });
-      disconnect(tabId);
-    }
-    throw error;
+    // The identity is linked regardless of temporary PUSH availability.
+    console.warn('Agent Network PUSH connection delayed:',String(error));
   }
+  return {agentId:record.agentId,name:record.name,
+          created:created&&!profile.agentId,linked:!!profile.agentId};
 }
 async function updateToken(tabId, replacement) {
   const {key,record}=await currentRecord(tabId);
@@ -1465,8 +1683,12 @@ async function repeatBootstrap(tabId) {
   await conversationTab(tabId,key);
   if(!latest || latest.agentId!==record.agentId)
     throw Error('Привязка агента изменилась во время отправки.');
-  // A manual reminder is not a new registration and does not modify agent
-  // credentials, conversation ownership or bootstrapDone state.
+  // Manual initialization is optional and never changes the server lease.
+  await updateRecords(entries=>{
+    if(entries[key]?.agentId===record.agentId &&
+       entries[key]?.token===record.token)
+      entries[key].identityIntroduced=true;
+  });
   return {sent:true,agentId:record.agentId};
 }
 async function stopAgent(tabId) {
@@ -1579,6 +1801,9 @@ async function runSchedule(key) {
           const tab=await chrome.tabs.get(owner.id);
           if(chatKey(tab?.url)!==key) throw Error('Чат изменился');
           const prompt=[
+            ...(current.identityIntroduced===false
+              ? [bootstrapPrompt(current,current.bootstrapMigrated===true),'']
+              : []),
             '[Agent Network schedule]',
             'Agent name: '+current.name,
             'agent_id: '+current.agentId,
@@ -1591,6 +1816,11 @@ async function runSchedule(key) {
             type:'agent:send',text:prompt,url:tab.url,
           });
           if(!result?.ok) throw Error(result?.error||'Не удалось отправить сообщение');
+          if(current.identityIntroduced===false) await updateRecords(entries=>{
+            if(entries[key]?.agentId===current.agentId &&
+               entries[key]?.token===current.token)
+              entries[key].identityIntroduced=true;
+          });
           state='sent';
           reason='Пробуждение отправлено';
         });
@@ -1663,8 +1893,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
         // receive no pending-transfer metadata.
         const pending=!sender?.tab && record?.agentId
           ? (await pendingChatTransfers())[pendingTransferKey(record)] : null;
+        if(!sender?.tab)
+          await recoverOrphanDeferredChatBinding(message.tabId);
+        const deferred=!sender?.tab
+          ? (await deferredChatBindings())[String(message.tabId)] : null;
         return {
           server,
+          deferredBinding:deferred ? {
+            kind:deferred.kind,state:deferred.state,
+            targetUrl:deferred.targetUrl||null,
+            error:deferred.error||null,
+            phase:deferred.phase||null,
+          } : null,
           pendingTransfer:pending ? {toChatUrl:pending.to} : null,
           entry:record && {
             agentId:record.agentId,name:record.name,role:record.role,
@@ -1727,6 +1967,14 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
           message.expectedServerTokenId,message.expectedServerChatUrl,
           message.allowTakeover===true
         ));
+      case 'network:cancel-deferred':
+        if(sender?.tab) throw Error('Отмена привязки доступна только из popup.');
+        // Cancellation cannot wait behind a running lifecycle operation,
+        // otherwise it can lie that a committed transfer was cancelled.
+        return cancelDeferredChatBinding(message.tabId);
+      case 'network:confirm-deferred':
+        if(sender?.tab) throw Error('Подтверждение привязки доступно только из popup.');
+        return confirmDeferredChatBinding(message.tabId,message.expectedDestination);
       case 'network:unlink':
         if(sender?.tab) throw Error('Отвязка доступна только из popup.');
         return lifecycle(()=>unlinkAgent(message.tabId));
@@ -1756,6 +2004,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   return true;
 });
 chrome.tabs.onRemoved.addListener(tabId => {
+  void cancelDeferredChatBinding(tabId);
   disconnect(tabId);
   traffic.clear(tabId);
   void (async () => {
@@ -1777,6 +2026,8 @@ chrome.tabs.onUpdated.addListener((tabId,changes) => {
   traffic.clear(tabId);
   void (async () => {
     const key=chatKey(changes.url);
+    if(key) await finishDeferredChatBinding(tabId);
+    else if(!newChatUrl(changes.url)) await cancelDeferredChatBinding(tabId);
     const connection=connections.get(Number(tabId));
     if (connection && connection.key!==key) disconnect(tabId);
     await updateRecords(entries=>{
@@ -1790,17 +2041,23 @@ chrome.tabs.onUpdated.addListener((tabId,changes) => {
 });
 chrome.alarms.create('agent-network-resume', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener(a => {
-  if(a.name === 'agent-network-resume') void resumeAll();
+  if(a.name === 'agent-network-resume') {
+    void resumeAll();
+    void finishAllDeferredChatBindings();
+  }
   if(a.name.startsWith(SCHEDULE_PREFIX))
     void runScheduleExclusive(a.name.slice(SCHEDULE_PREFIX.length));
 });
 chrome.runtime.onStartup.addListener(() => {
   void resumeAll();
   void restoreSchedules();
+  void finishAllDeferredChatBindings();
 });
 chrome.runtime.onInstalled.addListener(() => {
   void resumeAll();
   void restoreSchedules();
+  void finishAllDeferredChatBindings();
 });
 void resumeAll();
 void restoreSchedules();
+void finishAllDeferredChatBindings();

@@ -88,7 +88,8 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
 <label for="description">Описание и возможности</label><textarea id="description" maxlength="2000" placeholder="Что агент умеет и за что отвечает"></textarea>
 <div class="agent-actions"><button class="primary" id="start">Старт</button><button class="secondary" id="stop">Стоп</button><button class="ghost" id="unlink" disabled>Отвязать</button></div>
 <div class="agent-actions"><button class="secondary" id="repeat-bootstrap" disabled
-  title="Повторно отправить агенту его идентичность и инструкции MCP">↻ Напомнить агенту контекст</button></div>
+  title="Отправить агенту идентичность и инструкции MCP">↻ Отправить инструкции агенту</button></div>
+<div class="agent-actions"><button class="primary" id="confirm-deferred" hidden>Привязать к этому чату</button><button class="ghost" id="cancel-deferred" hidden>Отменить ожидание чата</button></div>
 <div id="migration-confirm" class="transfer-review" hidden role="group" aria-labelledby="migration-title">
   <strong id="migration-title">Перенос существующего агента</strong>
   <p id="migration-description"></p>
@@ -99,7 +100,7 @@ small.hint{display:block;color:#8096af;font-size:10px;margin:9px 0 0;line-height
   </div>
 </div>
 <div class="agent-actions"><button class="ghost" id="show-hud" disabled>◈ Показать плавающее окно</button></div>
-<small class="hint">Агент привязан к ID беседы, а не вкладке: при открытии этого чата в другой вкладке имя и настройки сохраняются. Плавающее окно открывается только этой кнопкой.</small>
+<small class="hint">Привязка и перенос не прерывают генерацию ответа и не отправляют сообщений. Если у пустой страницы ещё нет ID беседы, расширение дождётся первого сообщения пользователя, затем покажет точный URL для подтверждения привязки — без служебной переписки. Инструкции можно отправить кнопкой; первый PUSH тоже представит агента. Плавающее окно открывается только этой кнопкой.</small>
 </section>
 
 <section class="section" id="schedule-section" hidden>

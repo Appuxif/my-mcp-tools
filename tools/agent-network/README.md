@@ -325,9 +325,8 @@ require HTTP Basic and same-origin protection. The agent has a **read-only**
 native MCP tool `read_instructions(agent_id, token)` that returns its own
 `{instructions, updated_at, bytes}`; other agents cannot read it through MCP,
 and there is no MCP tool to update instructions. The text is not included in
-public agent metadata, global snapshots or Chrome extension storage. On
-initial ChatGPT bootstrap and **Напомнить агенту контекст**, the extension asks
-that agent to call `read_instructions` once. The separate `save_context` and
+public agent metadata, global snapshots or Chrome extension storage. On the first PUSH after binding or when the user clicks **Отправить
+инструкции агенту**, the extension asks the agent to call `read_instructions` once. The separate `save_context` and
 `read_context` workflow remains user-directed and independent of instructions.
 Admin instructions are plaintext on disk; do not put tokens or secrets there.
 
@@ -506,22 +505,50 @@ Do not expose this administrator-only feature through a public proxy.
    then fill in name/role/purpose/description and press **Старт**.
    Existing agents already bound to a chat reconnect without this step.
    **Панель состояния** opens the separate HTTP Basic-authenticated Dashboard.
-5. The extension sends a bootstrap identity prompt to ChatGPT. Use
-   **↻ Напомнить агенту контекст** in the popup to send that exact prompt
-   again without changing the registration. The popup shows and can copy
-   the current agent ID. Wake prompts include the same agent ID and token
-   (but never the administrator token or queued message bodies), so the
-   resumed model has the credentials to call `get_messages`. The own agent
-   token is therefore visible in ChatGPT conversation history; treat these
-   threads as private.
+5. **Start immediately binds the identity without sending any ChatGPT
+   message.** It does not require an idle editor or interrupt generation.
+   The first actual server PUSH (or scheduled wake) includes the agent ID,
+   scoped token and introduction with permanent instructions. The button
+   **Отправить инструкции агенту** sends the introduction on demand.
+   Administrator credentials and queued message bodies are never included
+   in the ChatGPT messages.
+
+   A blank ChatGPT page has no conversation ID yet. The extension saves
+   the intended binding without contacting the server. After the user
+   creates a conversation through their own first message, reopen the popup:
+   it shows the EXACT destination conversation URL and asks for a final
+   confirmation. Opening an unrelated existing chat via the sidebar must
+   never silently claim its identity. Confirming the URL then binds the
+   agent immediately, even if ChatGPT is still generating. No synthetic
+   primer is sent. Pending choices can be cancelled before server
+   processing begins; once server processing begins, Cancel explicitly
+   reports that cancellation is no longer guaranteed.
+
+   **Service-worker/browser restart during confirmation:** A persisted
+   operation moves through explicit preparing, server_request and
+   local_committed phases. When the extension resumes, it never replays an
+   unfinished server mutation blindly. Instead it checks authoritative
+   chat-binding metadata and extension-local credentials. If the intended
+   server binding never changed, the popup offers another explicit URL
+   confirmation. If a matching locally authenticated binding already
+   completed, it clears the stale waiting record. If the server may have
+   issued a scoped bearer whose plaintext reply was lost, the popup shows
+   **recovery required**: use the agent catalog to rebind deliberately.
+   Transient network failures, HTTP 503/429, and temporarily missing or
+   unauthorized admin credentials leave recovery in a retryable verification
+   state. The resume alarm and popup status recheck only authoritative
+   server metadata; **no registration or transfer POST is retried**.
+   Once access returns, a still-uncommitted operation returns to explicit
+   URL confirmation, while verified lost tokens remain for manual repair.
+   **Сбросить ожидание** clears only the local waiting record and must
+   not be mistaken for canceling an already-completed server operation.
 
 The agent identity is stored in `chrome.storage.local` under the **ChatGPT
 conversation ID**, not the Chrome tab ID. Both normal links such as
 `https://chatgpt.com/c/<conversation-id>` and project-scoped links such as
 `https://chatgpt.com/g/<project-id>/c/<conversation-id>` resolve to the **same
 agent**. Opening that chat in a second tab automatically restores its name,
-role, credentials and registration in the popup, without sending a second
-bootstrap identity prompt.
+role, credentials and registration without sending any ChatGPT message.
 
 One browser tab owns the **PUSH WebSocket per conversation**. Opening more
 tabs does not create duplicate wakes. On closing or navigating away from the
@@ -641,32 +668,45 @@ v0.8.0), using its configured administrator token.
    and URL at prepare time (compare-and-swap); intervening rebinds return
    HTTP 409 without revoking anybody. Active PUSH for the source is then
    temporarily suspended.
-3. If the destination is a new-chat page without a conversation ID, the
-   extension sends a harmless **secret-free introductory message** to create
-   the new conversation. After ChatGPT assigns a stable ID, it waits until
-   the primer's response finishes and the composer is truly **idle**
-   (up to 90 seconds). A human draft/attachment cancels migration safely
-   rather than being overwritten.
-4. The extension asks the server to prepare a transfer to the exact
-   destination URL. The server checks that this chat is unoccupied, reserves
-   it and generates a **provisional token that is not yet authorized**.
-   Any conflict returns HTTP 409 **before** any identity token is sent
-   to the destination chat.
-5. The extension sends a migrated bootstrap containing only the new
-   provisional token and instructions to read the permanent agent
-   instructions and optional saved compact summary.
-6. After the new chat accepts the bootstrap, the extension commits the
-   transfer. The server atomically replaces the active token and the
-   authoritative chat URL, invalidating the original chat's bearer; the old
-   WebSocket connection is closed. The extension moves the local binding
-   and activates PUSH in the new chat.
+3. If the destination is a blank ChatGPT page without a conversation
+   ID, the extension queues the move without sending messages or touching
+   the old binding. After the first user message produces the /c/ ID, open
+   the popup and click **Привязать к этому чату** after verifying its exact
+   URL. This additional confirmation is essential because opening a
+   pre-existing chat from the sidebar also changes the URL to /c/<id>:
+   navigation alone cannot authorize revoking another chat's token.
+   The actual transfer proceeds even while ChatGPT is generating a reply.
+   **Отменить ожидание чата** succeeds only before processing begins;
+   afterward it reports that cancellation is unavailable.
+4. For a destination with a stable ID, the extension immediately stages
+   a transfer against the exact source and destination, reserving an inactive,
+   provisional credential. Destination conflicts are detected before commit.
+5. **No bootstrap or ChatGPT composer interaction is required.** The server
+   atomically activates the new scoped chat credential and revokes the old
+   lease (or rotates an authenticated legacy primary). Source PUSH closes,
+   destination PUSH connects without waiting for the model to finish.
 
-Before commit, the old chat's credential remains valid and the staged new
-token cannot be used for MCP calls. If the new bootstrap or destination
-validation fails, the extension aborts the pending transfer, leaves the
-source binding intact and reconnects its PUSH. A failed send may have
-placed a now-invalid provisional token in the destination chat history;
-this token is not usable and the next attempt generates a new one.
+The first successful destination PUSH (or manual instruction button) can
+introduce the agent and request read_context and read_instructions. The
+source credential remains valid until server commit, and a provisional
+credential cannot authenticate before commit. Failed validation, conflicts
+or aborted transfers leave the source server binding intact. No provisional
+bearer is ever placed in the new chat transcript before commit.
+
+**Deferred confirmation interrupted by browser restart:** The extension
+detects an orphaned processing marker and reconciles the destination
+against the authoritative server lease, existing local credentials, and
+durable pendingChatTransfers state. If the source A still owns its unchanged
+lease, the popup allows confirming B again after reading the actual B URL.
+If A to B committed and B's credential remains locally available, it
+finalizes the local state without replaying the commit. If B has a live
+server credential but its plaintext is unavailable, automatic replay is
+disabled: the popup requires manual recovery/rebind through the agent
+catalog. Temporary server or admin authorization failures do not permanently
+block reconciliation; only the read-only verification is retried on
+subsequent resume alarms or popup status requests. Clearing this waiting
+indicator does NOT revoke a token or reverse an already committed server
+operation.
 
 **Ambiguous commit recovery:** before posting the server commit, the
 extension persists the intended transfer and new scoped credential in its
@@ -683,8 +723,8 @@ and the abort request, so the extension rechecks authoritative lease metadata.
 If that recheck fails, pending recovery state remains and source stays
 inactive. Until ownership is confirmed, Stop/Unlink/server changes and
 manual token replacement are blocked for the affected agent. The popup shows
-the pending destination. A successful reconnection does not require repeating
-the bootstrap or reissuing a new credential.
+the pending destination. A successful reconnection does not require manually sending
+any introduction or reissuing a new credential.
 
 **Administrative revocation during pending transfer:** rotation of the
 agent's primary token or explicit revocation of its chat credential removes
@@ -712,13 +752,13 @@ duplicated. Credentials are not returned through the popup UI.
 ChatGPT conversation contains the permanent primary token can be moved
 with the normal **Перенос** action — no manual Dashboard rotation or
 rebind is needed. The extension authenticates the original token via the
-admin-only local API, stages an inactive destination chat token, and sends
-only that staged token to the new conversation. **Only after successful
-bootstrap**, the server commits the migration in one SQLite transaction:
+admin-only local API and stages an inactive destination chat token.
+**Without sending a message to the new conversation**, the server commits
+the migration in one SQLite transaction:
 it replaces the old permanent primary token with a random, unrecoverable
 new primary hash and activates the new chat-scoped credential. The old
 ChatGPT history's primary token is then unusable; Agent ID, teams, history
-and saved context persist. If bootstrap fails or the staged transfer is
+and saved context persist. If validation fails or the staged transfer is
 aborted, the old primary remains valid; after an uncertain commit the old
 PUSH remains paused instead of reconnecting a legacy permanent bearer
 that could compete with another browser's new scoped lease. The user can
@@ -726,7 +766,7 @@ retry migration, with no manual Dashboard rotation. Pending transfers
 are reconciled on reconnection without reviving revoked credentials.
 The popup warns before confirmation because rotating the primary also
 invalidates any other client that was using that same legacy credential.
-No administrator credential is included in the ChatGPT bootstrap.
+No administrator credential is included in ChatGPT PUSH or manual reminders.
 
 **Expired or revoked old-chat token (HTTP 401/403):** This is not a reason to
 block a user-confirmed migration. The extension checks the agent's identity
@@ -755,7 +795,7 @@ to prevent duplicate bindings across concurrent local Start operations.
 ### Floating per-conversation HUD (Chrome extension v0.6.0)
 
 The floating status card is now **opt-in**. Pressing **Start** registers
-the agent and sends its bootstrap identity prompt, but **does not show**
+the agent without sending a ChatGPT prompt, and **does not show**
 any overlay. The card is also hidden by default when a registered chat is
 opened, restored or duplicated in another browser tab.
 

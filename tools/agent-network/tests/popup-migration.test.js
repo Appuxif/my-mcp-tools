@@ -14,7 +14,7 @@ const EXISTING={
 };
 function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
   deletedBound=false,bindConflictOnce=false,legacyPrimary=false,
-  takeover=false,allowTakeover=true}={}) {
+  takeover=false,allowTakeover=true,deferred=null,deferredCancelBlocked=false}={}) {
   const elements=new Map();
   const el=id=>{
     if(!elements.has(id)){
@@ -37,6 +37,7 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
     active:true,agentId:'agent-uuid',bootstrapDone:true,
   }:null;
   let adminConfigured=false;
+  let pendingDeferred=deferred;
   let schedule=null;
   let currentTeams=[{team_id:'default',name:'default'}];
   const secret='TEST_ADMIN_SECRET_'.repeat(4);
@@ -47,7 +48,8 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
       switch(msg.type){
         case 'network:status':return {
           ok:true,server:'http://127.0.0.1:8787',
-          entry:current,connected:!!current,ui:{state:'idle',network:'idle'},
+          entry:current,deferredBinding:pendingDeferred,
+          connected:!!current,ui:{state:'idle',network:'idle'},
         };
         case 'network:available-agents':
           if(deletedBound && current) {current=null;return {ok:true,items:[],removedCurrent:true};}
@@ -88,6 +90,17 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
           if(migrateFails)return {ok:false,error:'Failed validation'};
           current={...EXISTING,active:true,bootstrapDone:true};
           return {ok:true,migrated:true,name:'Existing-Worker',agentId:'agent-uuid'};
+        case 'network:confirm-deferred':
+          if(msg.expectedDestination!==pendingDeferred?.targetUrl)
+            return {ok:false,error:'Destination changed'};
+          pendingDeferred=null;
+          current={...EXISTING,bootstrapDone:true,active:true};
+          return {ok:true,linked:true};
+        case 'network:cancel-deferred':
+          if(deferredCancelBlocked)
+            return {ok:true,cancelled:false,reason:'in_progress'};
+          pendingDeferred=null;
+          return {ok:true,cancelled:true};
         case 'network:unlink':
           current=null;
           return {ok:true,unlinked:true};
@@ -133,6 +146,56 @@ function createPopup({migrateFails=false,registered=false,agents=[EXISTING],
     async ready(){assert.ok(onDOMContentLoaded);await onDOMContentLoaded();}
   };
 }
+
+test('retryable orphan recovery popup shows automatic verification and safe local reset',async()=>{
+  const ui=createPopup({deferred:{kind:'migrate',state:'recovery_retry',
+    error:'Lookup temporarily unavailable',phase:'server_request'}});
+  await ui.ready();
+  assert.equal(ui.el('confirm-deferred').hidden,true);
+  assert.equal(ui.el('cancel-deferred').hidden,false);
+  assert.match(ui.el('cancel-deferred').textContent,/Сбросить ожидание/);
+  assert.match(ui.el('status').textContent,/автоматически повторит проверку/);
+  assert.match(ui.el('status').textContent,/НЕ повторяется/);
+});
+
+test('orphan recovery popup shows honest repair/reset status',async()=>{
+  const ui=createPopup({deferred:{kind:'start',state:'recovery_required',
+    error:'Токен привязки на сервере уже выдан, локальный токен потерян'}});
+  await ui.ready();
+  assert.equal(ui.el('confirm-deferred').hidden,true);
+  assert.equal(ui.el('cancel-deferred').hidden,false);
+  assert.match(ui.el('cancel-deferred').textContent,/Сбросить ожидание/);
+  assert.match(ui.el('status').textContent,/локальный токен потерян/);
+  assert.match(ui.el('status').textContent,/НЕ отзовёт/);
+});
+
+test('deferred destination requires an explicit URL confirmation in the popup',async()=>{
+  const target='https://chatgpt.com/c/44444444-4444-4444-4444-444444444444';
+  const ui=createPopup({deferred:{kind:'migrate',state:'confirm_destination',
+    targetUrl:target}});
+  await ui.ready();
+  assert.equal(ui.el('confirm-deferred').hidden,false);
+  assert.equal(ui.el('cancel-deferred').hidden,false);
+  assert.match(ui.el('status').textContent,/44444444-4444/);
+  assert.equal(ui.messages.some(m=>m.type==='network:confirm-deferred'),false);
+  await ui.click('confirm-deferred');
+  const call=ui.messages.find(m=>m.type==='network:confirm-deferred');
+  assert.equal(call.expectedDestination,target);
+  assert.match(ui.el('status').textContent,/привязан/);
+  assert.equal(ui.el('confirm-deferred').hidden,true);
+});
+
+test('popup never claims successful cancellation while binding is processing',async()=>{
+  const ui=createPopup({deferred:{kind:'start',state:'processing'},
+    deferredCancelBlocked:true});
+  await ui.ready();
+  assert.equal(ui.el('confirm-deferred').hidden,true);
+  assert.equal(ui.el('cancel-deferred').hidden,true);
+  // A stale popup may still issue the click while operation starts.
+  await ui.click('cancel-deferred');
+  assert.match(ui.el('status').textContent,/Отмена невозможна/);
+  assert.ok(ui.messages.some(m=>m.type==='network:cancel-deferred'));
+});
 
 test('selecting existing local agent fills original profile, Start requires confirmation',async()=>{
   const ui=createPopup();
