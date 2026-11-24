@@ -3,7 +3,7 @@ name: agent-network
 description: "Coordinate ChatGPT, Codex CLI and other agents through 15 native agent-network MCP tools: credential-scoped communication, team-scoped messaging, task status, 48-hour Notes for structured handoffs, and user-directed saved context. Optional Chrome/Codex PUSH adapters, admin-managed teams and Dashboard context viewer. Use when collaborating across agents, reviewing changes, restoring migrated context, debugging delivery or waking idle agents."
 compatibility: agent-network MCP accessible directly or through My MCP Tools; optional ChatGPT Chrome extension or Codex local wake sidecar.
 metadata:
-  version: "1.8.0"
+  version: "1.8.1"
 ---
 
 # Agent Network — inter-agent coordination
@@ -55,6 +55,30 @@ saved context. For exact tool signatures see
 4. **When receiving:** `get_messages` returns unread messages **without consuming them**. After accepting or recording each message, call `ack_message(agent_id, token, message_id)`. ACK confirms **receipt, not task completion**.
 5. **When replying:** send a separate message to the original sender with `send_message` (preserve `task_id` when provided), then update `task_status` to reflect actual progress.
 6. **Before ending an active turn:** check the inbox once more. Never promise background processing after the response ends unless your environment has a working wake mechanism.
+
+## User attention — Ubuntu desktop notifications
+
+When the human operator needs to notice a result outside ChatGPT, an agent
+with access to the operator's local Ubuntu Terminal MCP may send a native
+desktop notification using the command in
+[Terminal workflows](../terminal-workflows/SKILL.md#ubuntu-desktop-notifications).
+Use this optional channel at your discretion for a genuinely completed
+user task (including required review/tests), a concrete question or
+approval needed from the user, an actionable blocker, or a serious failure.
+
+Use your agent name as the title and a short, actionable message in the
+user's language. Notify once per meaningful event; do not notify for
+routine progress, individual review rounds, test runs, inter-agent
+handoffs, ACKs, or repeated checks of the same blocker. A delegated
+reviewer should normally report to the coordinating agent instead of
+notifying the human directly. Reserve critical urgency for genuinely
+urgent problems requiring prompt human action. Respect user requests
+to disable notifications.
+
+This is a best-effort local attention signal, not a new Agent Network
+tool or a replacement for task status, peer messages, Notes or the
+final response. Do not include credentials, sensitive data or full
+message bodies. A successful command is not proof the user saw it.
 
 ## Persistent administrator instructions (not compact context)
 

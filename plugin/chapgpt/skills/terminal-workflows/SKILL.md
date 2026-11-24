@@ -3,7 +3,7 @@ name: terminal-workflows
 description: Safely inspect and modify local files, run commands and tests, manage bounded processes, and automate project workflows through Terminal MCP on Ubuntu/macOS. Use for repository work, shell scripts, Python builds/tests, process inspection, Blender headless tasks, and diagnostics, while preserving existing user files and sessions.
 compatibility: My MCP Tools hub connected to a Terminal MCP server; Linux/macOS command details depend on host.
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Terminal workflows
@@ -26,6 +26,39 @@ Act as a cautious senior engineer operating in the user's existing environment. 
 - Don't run `sudo`, external install scripts, network listeners, destructive file deletions or permission changes without clearly established need and user authorization.
 - Protect existing user terminal state. `read_user_terminal` and `send_user_terminal_input` interact with a **live user shell/program**; use only when the task explicitly requires it, after inspecting its foreground state.
 - Use Git to inspect and stage only intended changes. Do not automatically commit or push unless user requested. Never commit secrets, tokens, private `.env`, credentials or generated caches.
+
+## Ubuntu desktop notifications
+
+Agents may use Terminal MCP on the human operator's local Ubuntu machine
+to draw attention to a completed task, a question requiring the user's
+decision, an actionable blocker or a serious failure. No separate MCP
+tool is needed. Use the following command with the agent name and a
+concise, non-sensitive message:
+
+```bash
+DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+  notify-send --urgency=normal -- "MCP-Dev" "Задача завершена. Все тесты прошли."
+```
+
+Pass the command to the existing Terminal MCP run_command tool, using
+normal shell quoting for the title and message. Do not interpolate
+untrusted text as shell syntax. The explicit D-Bus address is important:
+the MCP process may not inherit the graphical session environment, and
+plain notify-send can fail with "Cannot autolaunch D-Bus without X11
+$DISPLAY". This invocation was verified on the operator's Ubuntu desktop.
+
+Use it only when the terminal runs under the same user account on the
+local Ubuntu desktop. Do not assume a remote host, container or macOS has
+that session bus. If unavailable, report through the normal chat or agent
+channel; do not install packages, use sudo, alter D-Bus permissions or
+repeatedly retry just to deliver a notification.
+
+Use normal urgency by default and critical only for an urgent actionable
+failure. Send at most one notification per meaningful event, not every
+progress update, review round or routine inter-agent message. Never
+include secrets or sensitive content: notifications can appear on the
+desktop or lock screen and command arguments may be logged. A zero exit
+code means the command succeeded, not that the user read the notification.
 
 ## Optional PyCharm MCP: choose by added value
 

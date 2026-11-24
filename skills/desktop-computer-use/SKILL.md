@@ -3,7 +3,7 @@ name: desktop-computer-use
 description: Operate an Ubuntu GNOME Wayland desktop using the user's Ubuntu Desktop MCP, AT-SPI accessibility, screenshots, mouse/keyboard actions and UI-change waiting; route browser tasks to Chrome DevTools MCP and 3D tasks to Blender MCP. Use for GUI navigation, dialogs, clicking, typing, drag-and-drop, window inspection, or cross-app workflows.
 compatibility: Ubuntu GNOME Wayland; My MCP Tools hub with ubuntu-desktop (optional chrome-devtools, blender, terminal).
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Desktop computer use
@@ -39,6 +39,15 @@ Act as a careful GUI operator. Prefer **semantic, reversible, observable** actio
 - Use paired `mouse_down`/`mouse_up` and `key_down`/`key_up`. Batch tools release newly held inputs on failure, but verify after interrupted tasks.
 - Default `run_actions` limits: up to 40 actions and up to 12 seconds combined waits/drags; `wait_for_change` action subchain: up to 30 and 10 seconds. Do not overfill a batch: insert verification boundaries.
 - The GNOME idle inhibitor automatically renews on MCP tool calls and expires after inactivity (default 120 seconds). It does not disable manual lock; do not modify system lock settings.
+
+## Desktop notifications
+
+For optional user-attention notifications on the local Ubuntu desktop,
+use Terminal MCP and the D-Bus-aware notify-send command documented in
+[Terminal workflows](../terminal-workflows/SKILL.md#ubuntu-desktop-notifications).
+Do not simulate GUI clicks or add a separate desktop MCP tool for this.
+Follow the same event-based, non-spam and privacy rules; a notification
+does not replace the ordinary task result.
 
 ## Safety and evidence
 
